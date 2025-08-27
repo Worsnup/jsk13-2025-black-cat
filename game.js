@@ -55,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let exitAngle = Math.random() * Math.PI * 2; // local angle on ball
 
     // IK rigid-rod rope (visual-only; one-way coupling)
-    let SEG_LEN = 16;  // target segment length used in constraints
+    let SEG_LEN = 8;  // target segment length used in constraints
     const ROPE_ITERS = 2;    // a touch firmer for less numeric slop
     const ROPE_DAMP = 0.90; // higher damping to quell high-freq jiggle
     const ROPE_SUBSTEPS = 2; // integrate/solve in smaller steps for stability
@@ -535,8 +535,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function step(now) {
         if (pending_nodes > 0) {
-            // if distance from ball to first node is smaller than SEG_LEN, do not generate tail segment
-            if (nodes.length < 2 || Math.hypot(ball.x - nodes[0].x, ball.y - nodes[0].y) > SEG_LEN * 0.9) {
+            if (nodes.length < 2 || Math.hypot(ball.x - nodes[0].x, ball.y - nodes[0].y) >= SEG_LEN) {
                 addTailSegment();
                 pending_nodes--;
             }
