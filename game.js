@@ -30,6 +30,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const rest = 0.72;      // bounciness
     const wallRest = 0.6;   // side bounciness
     const radius = 40;      // yarn radius in px
+    const groundEps = 0.75; // contact tolerance in px
+    const slideFriction = 0.9; // sliding friction scalar on bounce (0..1)
+
 
     // Ball state
     const ball = {
@@ -242,15 +245,21 @@ document.addEventListener('DOMContentLoaded', () => {
         // Collisions: floor and walls
         if (ball.y + radius > h) {
             ball.y = h - radius;
-            ball.vy *= -rest;
-            // small friction on bounce
-            ball.vx *= 0.98;
-            // couple linear velocity into spin (rolling tendency)
-            ball.spin += (ball.vx / radius) * 0.45;
+            if (ball.vy > 0) {
+                // Only bounce if moving downward
+                ball.vy *= -rest;
+                // small friction on bounce
+                ball.vx *= slideFriction;
+                // couple linear velocity into spin once per impact
+                ball.spin += (ball.vx / radius) * 0.25;
+            } else {
+                // Cancel tiny upward drift when embedded
+                if (ball.vy > -40) ball.vy = 0;
+            }
         }
         if (ball.y - radius < 0) {
             ball.y = radius;
-            ball.vy *= -wallRest;
+            if (ball.vy < 0) ball.vy *= -wallRest;
         }
         if (ball.x - radius < 0) {
             ball.x = radius;
