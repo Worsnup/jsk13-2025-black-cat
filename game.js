@@ -27,8 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ===== World params =====
     const grav = 1200;        // px/s^2
-    const rest = 0.72;        // coefficient of restitution (floor/ceiling)
-    const wallRest = 0.6;     // side restitution
+    const rest = 0.66;        // coefficient of restitution (floor/ceiling)
+    const wallRest = 0.55;    // side restitution
     const muGround = 0.6;     // Coulomb friction (floor/ceiling) — dimensionless
     const muWall = 0.5;       // Coulomb friction (walls)
     const radius = 40;        // yarn radius in px
@@ -311,23 +311,25 @@ document.addEventListener('DOMContentLoaded', () => {
         ball.y += ny * corr;
     }
 
-    function r_spool_of(L){
+    function r_spool_of(L) {
         return clamp(radius - alpha * (L_total - L), r_core, radius);
     }
+
     function drawRope() {
         // thickness fades toward tail
         ctx.lineCap = 'round';
         for (let i = 1; i < ROPE_N; i++) {
             const t = i / (ROPE_N - 1);
             ctx.strokeStyle = i < 3 ? 'rgba(255,200,220,0.9)' : 'rgba(230,160,190,0.85)';
-            ctx.lineWidth = 2.5 * (1 - 0.7 * t);
+            ctx.lineWidth = 3.1 * (1 - 0.65 * t);
             ctx.beginPath();
             ctx.moveTo(rope[i - 1].x, rope[i - 1].y);
             ctx.lineTo(rope[i].x, rope[i].y);
             ctx.stroke();
         }
     }
-    function formatMeters(px){
+
+    function formatMeters(px) {
         const m = px / pxPerMeter;
         return m.toFixed(1) + ' m';
     }
@@ -456,7 +458,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!ropeInited) {
             const targetLen0 = Math.max(6, L_free / (ROPE_N - 1));
             for (let i = 0; i < ROPE_N; i++) {
-                const t = i / (ROPE_N - 1);
                 rope[i].x = anchorX + tx_e * targetLen0 * i;
                 rope[i].y = anchorY + ty_e * targetLen0 * i + 2 * i; // slight sag
                 ropePrev[i].x = rope[i].x;
@@ -481,7 +482,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let sticking = Math.abs(tau_demand) <= tau_static_max;
         if (!sticking) {
             // Slip: update L_free and apply kinetic friction impulse on the ball
-            const feed = clamp(v_slip, -v_max_feed, v_max_feed);
+            const feed = clamp(v_slip, 0, v_max_feed); // prevent re-spooling (no negative feed)
             L_free = clamp(L_free + feed * dt, 0, L_total);
             const F_t = mu_spool_dynamic * N_spool * (v_slip > 0 ? -1 : 1); // oppose slip
             const Jt = F_t * dt;
@@ -491,9 +492,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             // Stick: drag rope speed to surface speed a bit (visual stability)
             if (ropeInited) {
-                const desired = v_ball_t;
-                const current = v_rope_t;
-                const corr = (desired - current) * 0.3; // small correction
+                const corr = (v_ball_t - v_rope_t) * 0.3; // small correction
                 ropePrev[1].x -= tx_e * corr * dt;
                 ropePrev[1].y -= ty_e * corr * dt;
             }
@@ -502,7 +501,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Rope dynamics (Verlet)
-        const damp = 0.995;
+        const damp = 0.95;
         for (let i = 1; i < ROPE_N; i++) {
             const x = rope[i].x, y = rope[i].y;
             const px = ropePrev[i].x, py = ropePrev[i].y;
@@ -514,13 +513,16 @@ document.addEventListener('DOMContentLoaded', () => {
             rope[i].y = y + vy;
         }
         // Pin head to anchor
-        rope[0].x = anchorX; rope[0].y = anchorY;
-        ropePrev[0].x = anchorX; ropePrev[0].y = anchorY;
+        rope[0].x = anchorX;
+        rope[0].y = anchorY;
+        ropePrev[0].x = anchorX;
+        ropePrev[0].y = anchorY;
         // Enforce segment lengths to approximate L_free
         const targetLen = Math.max(4, L_free / (ROPE_N - 1));
-        for (let iter = 0; iter < 3; iter++) {
+        for (let iter = 0; iter < 5; iter++) {
             // forward
-            rope[0].x = anchorX; rope[0].y = anchorY;
+            rope[0].x = anchorX;
+            rope[0].y = anchorY;
             for (let i = 1; i < ROPE_N; i++) {
                 let dxs = rope[i].x - rope[i - 1].x;
                 let dys = rope[i].y - rope[i - 1].y;
@@ -541,14 +543,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 rope[i].x -= dxs * diff * 0.5;
                 rope[i].y -= dys * diff * 0.5;
-                rope[0].x = anchorX; rope[0].y = anchorY; // repin
+                rope[0].x = anchorX;
+                rope[0].y = anchorY; // repin
             }
         }
 
         // Render
         ctx.clearRect(0, 0, c.clientWidth, c.clientHeight);
         // Background
-        ctx.fillStyle = '#111';
+        ctx.fillStyle = '#36a';
         ctx.fillRect(0, 0, c.clientWidth, c.clientHeight);
 
         // Ground line for reference
