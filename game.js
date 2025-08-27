@@ -336,7 +336,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Render
         ctx.clearRect(0, 0, c.clientWidth, c.clientHeight);
         // Background
-        ctx.fillStyle = '#111';
+        ctx.fillStyle = '#36a';
         ctx.fillRect(0, 0, c.clientWidth, c.clientHeight);
 
         // Ground line for reference
