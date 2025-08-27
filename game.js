@@ -271,6 +271,31 @@ document.addEventListener('DOMContentLoaded', () => {
             ball.spin *= 0.9;
         }
 
+        // Ground contact rolling model (no-slip convergence + friction)
+        const onGround = (h - (ball.y + radius)) <= groundEps;
+        if (onGround) {
+            // Drive towards rolling without slipping: vx ≈ spin * r
+            const vt = ball.vx - ball.spin * radius; // contact tangential slip speed
+            // Proportional correction, limited per step
+            const k = clamp(14 * dt, 0, 1); // how aggressively we correct
+            const corr = clamp(-k * vt, -200 * dt, 200 * dt); // avoid huge impulses
+            ball.vx += corr;
+            ball.spin += (corr / radius);
+
+            // Rolling resistance (very small)
+            const rollDamp = Math.exp(-dt * 0.8);
+            ball.spin *= rollDamp;
+
+            // Tiny kinetic friction to bleed residual sliding
+            const slipDamp = Math.exp(-dt * 6);
+            const slip = ball.vx - ball.spin * radius;
+            ball.vx = ball.spin * radius + slip * slipDamp;
+
+            // Prevent sinking jitter
+            if (ball.vy > 0) ball.vy = 0;
+            ball.y = h - radius;
+        }
+
         // If off-screen far below (after energy degraded), reset near top
         if (ball.y - radius > h + 400) {
             ball.x = w * 0.5;
