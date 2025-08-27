@@ -56,10 +56,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // IK rigid-rod rope (visual-only; one-way coupling)
     let SEG_LEN = 16;  // target segment length used in constraints
-    const ROPE_ITERS = 6;    // a touch firmer for less numeric slop
+    const ROPE_ITERS = 2;    // a touch firmer for less numeric slop
     const ROPE_DAMP = 0.992; // higher damping to quell high-freq jiggle
     const ROPE_SUBSTEPS = 2; // integrate/solve in smaller steps for stability
     const ANCHOR_SMOOTH = 0.18; // per-frame smoothing toward moving anchor
+    // When unspooling (pending_nodes>0) let the last segments stretch a bit so the rope
+    // visually "makes room" for the incoming nodes without pops.
+    const GROW_LAG_MAX = 0.10;   // up to +10% longer near the tail
+    const GROW_BIAS_POW = 2.0;   // concentrate extra length toward the tail
     const nodes = [];
     let pending_nodes = 0;
     let ropeInited = false;
@@ -144,6 +148,19 @@ document.addEventListener('DOMContentLoaded', () => {
         // Use the post-integration tail position as the target
         const ti = nodes.length - 1;
         const tgtX = nodes[ti].x, tgtY = nodes[ti].y;
+
+        // Per-segment target length with optional HEAD-biased stretch (near yarn ball)
+        // when unspooling, so the rope makes room at the ball end instead of the tail.
+        // Segment index k spans nodes[k-1] -> nodes[k], where k ∈ [1 .. nodes.length-1]
+        const segTargetLen = (k) => {
+            if (pending_nodes <= 0) return SEG_LEN;
+            // Bias extra length toward the HEAD/ball (k near 1)
+            const t = k / (nodes.length - 1);            // 0 at head, 1 at tail
+            const headBias = Math.pow(Math.max(0, 1 - t), GROW_BIAS_POW);
+            const extra = Math.min(1, pending_nodes) * GROW_LAG_MAX * headBias;
+            return SEG_LEN * (1 + extra);
+        };
+
         for (let iter = 0; iter < ROPE_ITERS; iter++) {
             // ----- Forward reach: place tail at its target and pull chain toward head
             nodes[ti].x = tgtX;
@@ -152,7 +169,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const nx = nodes[i + 1].x - nodes[i].x;
                 const ny = nodes[i + 1].y - nodes[i].y;
                 const d = Math.hypot(nx, ny) || 1e-6;
-                const r = SEG_LEN / d;
+                // segment i..i+1 has segment index k = i+1
+                const r = segTargetLen(i + 1) / d;
                 nodes[i].x = nodes[i + 1].x - nx * r;
                 nodes[i].y = nodes[i + 1].y - ny * r;
             }
@@ -163,7 +181,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const nx = nodes[i].x - nodes[i - 1].x;
                 const ny = nodes[i].y - nodes[i - 1].y;
                 const d = Math.hypot(nx, ny) || 1e-6;
-                const r = SEG_LEN / d;
+                // segment i-1..i has segment index k = i
+                const r = segTargetLen(i) / d;
                 nodes[i].x = nodes[i - 1].x + nx * r;
                 nodes[i].y = nodes[i - 1].y + ny * r;
             }
