@@ -57,7 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // IK rigid-rod rope (visual-only; one-way coupling)
     let SEG_LEN = 16;  // target segment length used in constraints
     const ROPE_ITERS = 2;    // a touch firmer for less numeric slop
-    const ROPE_DAMP = 0.992; // higher damping to quell high-freq jiggle
+    const ROPE_DAMP = 0.90; // higher damping to quell high-freq jiggle
     const ROPE_SUBSTEPS = 2; // integrate/solve in smaller steps for stability
     const ANCHOR_SMOOTH = 0.18; // per-frame smoothing toward moving anchor
     const IK_UNDER_RELAX = 0.85; // 1 = full correction; <1 softens each constraint move
@@ -535,8 +535,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function step(now) {
         if (pending_nodes > 0) {
-            addTailSegment()
-            pending_nodes--;
+            // if distance from ball to first node is smaller than SEG_LEN, do not generate tail segment
+            if (nodes.length < 2 || Math.hypot(ball.x - nodes[0].x, ball.y - nodes[0].y) > SEG_LEN * 0.9) {
+                addTailSegment();
+                pending_nodes--;
+            }
         }
 
         const dt = clamp((now - last) / 1000, 0, 0.033); // clamp to ~30 FPS step for stability
