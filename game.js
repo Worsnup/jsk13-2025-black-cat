@@ -4,6 +4,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const c = document.createElement('canvas');
   const ctx = c.getContext('2d');
   content.innerHTML = '';
+  document.body.style.margin = '0';
+  document.body.style.overflow = 'hidden';
+  c.style.display = 'block';
   content.appendChild(c);
 
   // Size & resize handling
@@ -31,7 +34,9 @@ document.addEventListener('DOMContentLoaded', () => {
     x: c.clientWidth * 0.5,
     y: c.clientHeight * 0.25,
     vx: 140 * (Math.random() * 2 - 1),
-    vy: 0
+    vy: 0,
+    angle: 0,   // rotation around Z (radians)
+    spin: 0     // angular velocity (rad/s)
   };
 
   // Input state
@@ -57,45 +62,139 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Drawing the yarn ball
   function drawYarn(x, y, r) {
-    // Shadow
+    // Contact shadow (soft, stronger near contact)
+    const groundY = c.clientHeight;
+    const distToGround = Math.max(0, groundY - (y + r));
+    const contactT = 1 - Math.max(0, Math.min(1, distToGround / (r * 1.2)));
+    const shadowAlpha = 0.15 + 0.25 * contactT;
+    const shadowRY = r * (0.28 + 0.22 * contactT);
+    const shadowRX = r * (0.9 - 0.2 * contactT);
     ctx.save();
-    ctx.globalAlpha = 0.25;
+    ctx.globalAlpha = shadowAlpha;
     ctx.fillStyle = '#000';
     ctx.beginPath();
-    ctx.ellipse(x + r*0.2, y + r*0.9, r*0.9, r*0.35, 0, 0, Math.PI*2);
+    ctx.ellipse(x + r * 0.18, Math.min(groundY - 1, y + r + shadowRY * 0.2), shadowRX, shadowRY, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 
-    // Base ball
-    const grd = ctx.createRadialGradient(x - r*0.3, y - r*0.3, r*0.2, x, y, r);
-    grd.addColorStop(0, '#f6a'); // light pinkish
-    grd.addColorStop(1, '#c26'); // darker yarn
-    ctx.fillStyle = grd;
+    // Base diffuse shading (fabric-like, less plasticky)
+    const lgx = x - r * 0.45, lgy = y - r * 0.5; // light direction (up-left)
+    const base = ctx.createRadialGradient(lgx, lgy, r * 0.2, x, y, r * 1.05);
+    base.addColorStop(0.0, '#ff8cbc');  // light pink
+    base.addColorStop(0.45, '#f3669c');
+    base.addColorStop(1.0, '#b03a64');  // deep shadowed pink
+    ctx.fillStyle = base;
     ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI*2);
+    ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
 
-    // Yarn strands (simple arcs)
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-    ctx.lineWidth = 2;
-    for (let i = -r; i <= r; i += r/5) {
-      ctx.beginPath();
-      ctx.arc(x - r*0.3, y + i*0.15, r*1.05, -Math.PI*0.1, Math.PI*0.9);
-      ctx.stroke();
-    }
-    ctx.strokeStyle = 'rgba(80,0,40,0.35)';
-    ctx.lineWidth = 1.5;
-    for (let i = -r; i <= r; i += r/4.5) {
-      ctx.beginPath();
-      ctx.arc(x + r*0.2, y + i*0.18, r*0.9, Math.PI*0.1, Math.PI*1.1);
-      ctx.stroke();
+    // Clip to sphere and draw texture/strands inside
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.clip();
+
+    // Slight overall darkening toward rim (fabric Fresnel)
+    const rim = ctx.createRadialGradient(x, y, r * 0.2, x, y, r);
+    rim.addColorStop(0, 'rgba(0,0,0,0.0)');
+    rim.addColorStop(0.7, 'rgba(0,0,0,0.05)');
+    rim.addColorStop(1, 'rgba(0,0,0,0.18)');
+    ctx.fillStyle = rim;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+
+    // Rotate strand texture with spin so the yarn pattern moves with the ball
+    ctx.translate(x, y);
+    ctx.rotate(ball.angle);
+
+    // Strand parameters
+    const layers = [
+      { count: 18, ro: 1.02, w: 1.4, a: 0.40, hue: '#f9a9c8', tilt: -0.35 }, // lighter strands
+      { count: 16, ro: 0.96, w: 1.2, a: 0.30, hue: '#8a2b4f', tilt: 0.55 },  // darker in-between
+      { count: 12, ro: 0.88, w: 1.0, a: 0.22, hue: '#6b1f3d', tilt: 1.15 }   // deeper grooves
+    ];
+
+    // Draw wrapped great-circle arcs with slight jitter
+    for (const L of layers) {
+      ctx.strokeStyle = L.hue;
+      ctx.globalAlpha = L.a;
+      ctx.lineCap = 'round';
+      for (let i = 0; i < L.count; i++) {
+        const t = (i + 0.5) / L.count;
+        const phi = (t - 0.5) * Math.PI; // distribute across sphere
+        const jitter = (Math.sin(i * 12.9898) * 43758.5453) % 1; // deterministic
+        const offset = (jitter - 0.5) * 0.25;                    // small offset
+        const tilt = L.tilt + offset;
+
+        // Great-circle param sweep
+        ctx.beginPath();
+        ctx.lineWidth = L.w * (1.0 - 0.25 * Math.abs(Math.sin(phi))); // thinner near rim
+        // Draw as series of small chords approximating a curved wrap
+        let first = true;
+        for (let a = -Math.PI * 0.95; a <= Math.PI * 0.95; a += Math.PI / 60) {
+          const ca = Math.cos(a), sa = Math.sin(a);
+          // rotate by tilt around Z to get different families of wraps
+          const px = (r * L.ro) * (ca * Math.cos(tilt) - sa * Math.sin(tilt));
+          const py = (r * L.ro) * (ca * Math.sin(tilt) + sa * Math.cos(tilt)) * Math.cos(phi);
+          // simple foreshortening: fade as it goes "behind"
+          const behind = py > 0 ? 1 : 0.65;
+          if (first) {
+            ctx.moveTo(px, py);
+            first = false;
+          } else {
+            ctx.lineTo(px, py);
+          }
+          ctx.globalAlpha = L.a * behind;
+        }
+        ctx.stroke();
+      }
     }
 
-    // Center highlight
+    // Subtle cross-hatch noise for fiber fuzz
+    ctx.globalAlpha = 0.06;
+    ctx.fillStyle = '#ffffff';
+    for (let i = 0; i < 90; i++) {
+      const nx = (Math.random() * 2 - 1) * r;
+      const ny = (Math.random() * 2 - 1) * r;
+      if (nx * nx + ny * ny > r * r) continue;
+      const len = 2 + Math.random() * 6;
+      const ang = Math.random() * Math.PI;
+      ctx.save();
+      ctx.translate(nx, ny);
+      ctx.rotate(ang);
+      ctx.fillRect(-len * 0.5, -0.3, len, 0.6);
+      ctx.restore();
+    }
+
+    // Ambient occlusion at bottom inside the sphere
+    ctx.globalAlpha = 1;
+    const ao = ctx.createRadialGradient(0, r * 0.55, r * 0.1, 0, r * 0.55, r * 0.95);
+    ao.addColorStop(0, 'rgba(0,0,0,0.25)');
+    ao.addColorStop(1, 'rgba(0,0,0,0.0)');
+    ctx.fillStyle = ao;
+    ctx.fillRect(-r, 0, r * 2, r); // lower hemisphere
+
+    // Small soft specular highlight (fabric sheen, not plastic)
+    ctx.save();
+    ctx.rotate(-ball.angle); // keep highlight fixed in world/light space
+    ctx.translate(-x, -y);
+    const hx = x - r * 0.35, hy = y - r * 0.42;
+    const spec = ctx.createRadialGradient(hx, hy, 0, hx, hy, r * 0.5);
+    spec.addColorStop(0.0, 'rgba(255,255,255,0.35)');
+    spec.addColorStop(0.4, 'rgba(255,255,255,0.12)');
+    spec.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = spec;
     ctx.beginPath();
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-    ctx.lineWidth = 2;
-    ctx.arc(x, y, r*0.65, -Math.PI*0.2, Math.PI*0.6);
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore(); // end clip + texture
+
+    // Thin outer rim to suggest thickness
+    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(x, y, r - 0.5, 0, Math.PI * 2);
     ctx.stroke();
   }
 
