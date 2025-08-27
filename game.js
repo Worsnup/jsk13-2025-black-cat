@@ -215,6 +215,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Integrate
     ball.x += ball.vx * dt;
     ball.y += ball.vy * dt;
+    // Update angular motion
+    ball.angle += ball.spin * dt;
+    ball.spin *= 0.996; // air damping
 
     // Collisions: floor and walls
     if (ball.y + radius > h) {
@@ -222,6 +225,8 @@ document.addEventListener('DOMContentLoaded', () => {
       ball.vy *= -rest;
       // small friction on bounce
       ball.vx *= 0.98;
+      // couple linear velocity into spin (rolling tendency)
+      ball.spin += (ball.vx / radius) * 0.45;
     }
     if (ball.y - radius < 0) {
       ball.y = radius;
@@ -230,9 +235,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (ball.x - radius < 0) {
       ball.x = radius;
       ball.vx *= -wallRest;
+      ball.spin *= 0.9;
     } else if (ball.x + radius > w) {
       ball.x = w - radius;
       ball.vx *= -wallRest;
+      ball.spin *= 0.9;
     }
 
     // If off-screen far below (after energy degraded), reset near top
@@ -261,6 +268,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const base = 420 + clamp(approach * 0.6, -200, 800);
       ball.vx += -nx * base;
       ball.vy += -ny * base - 120; // a bit extra upward bias
+      // add some spin from tangential mouse swipes
+      const tangential = (-ny * mvx + nx * mvy);
+      ball.spin += (tangential / radius) * 0.0025;
       hitCooldown = 0.09; // short cooldown to avoid continuous pushing
     }
 
