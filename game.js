@@ -277,7 +277,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.globalAlpha = shadowAlpha;
         ctx.fillStyle = '#000';
         ctx.beginPath();
-        ctx.ellipse(x + r * 0.18, Math.min(groundY - 1, y + r + shadowRY * 0.2), shadowRX, shadowRY, 0, 0, Math.PI * 2);
+        ctx.ellipse(ball.x, Math.min(groundY - 1, h + r + shadowRY * 0.2), shadowRX, shadowRY, 0, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
 
@@ -477,7 +477,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const vn = P.length;
 
         // Helper to get tapered width along the rope [0..1]
-        const colorAt = (i) => (i < 3 ? 'rgba(255,200,220,0.9)' : 'rgba(230,160,190,0.85)');
+        const colorAt = (ignore) => 'rgba(230,160,190,0.85)'; //(i < 3 ? 'rgba(255,200,220,0.9)' : 'rgba(230,160,190,0.85)');
 
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
