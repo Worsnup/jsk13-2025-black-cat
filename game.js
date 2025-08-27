@@ -55,8 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Exit state
     let exitAngle = Math.random() * Math.PI * 2; // local angle on ball
 
-    // Short Verlet rope (visual)
-    const ROPE_N = 14;
+    // IK rigid-rod rope (visual-only; one-way coupling)
     const SEG_LEN_MIN = 6;   // minimum segment length
     const SEG_LEN_MAX = 14;  // keep segments within this visual range
     let SEG_LEN = 10;  // target segment length used in constraints
@@ -134,26 +133,49 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function satisfyRope(anchorX, anchorY) {
-        // Pin head
+        // FABRIK-style IK with rigid segments.
+        // Head is hard-pinned to the anchor; tail is "free" and guided by gravity
+        // via the integrateRope() prediction step. This is visual-only and does
+        // not feed impulses back into the ball.
+        if (nodes.length < 2) {
+            // Still pin the head if rope hasn't grown yet
+            nodes[0].x = anchorX;
+            nodes[0].y = anchorY;
+            nodes[0].px = anchorX;
+            nodes[0].py = anchorY;
+            return;
+        }
+        // Pin head (base)
         nodes[0].x = anchorX;
         nodes[0].y = anchorY;
         nodes[0].px = anchorX;
         nodes[0].py = anchorY;
-
+        // Use the post-integration tail position as the target
+        const ti = nodes.length - 1;
+        const tgtX = nodes[ti].x, tgtY = nodes[ti].y;
         for (let iter = 0; iter < ROPE_ITERS; iter++) {
-            // Head stays pinned each outer iteration
+            // ----- Forward reach: place tail at its target and pull chain toward head
+            nodes[ti].x = tgtX;
+            nodes[ti].y = tgtY;
+            for (let i = ti - 1; i >= 0; i--) {
+                const nx = nodes[i + 1].x - nodes[i].x;
+                const ny = nodes[i + 1].y - nodes[i].y;
+                const d = Math.hypot(nx, ny) || 1e-6;
+                const r = SEG_LEN / d;
+                nodes[i].x = nodes[i + 1].x - nx * r;
+                nodes[i].y = nodes[i + 1].y - ny * r;
+            }
+            // ----- Backward reach: re-pin head and push chain toward tail
             nodes[0].x = anchorX;
             nodes[0].y = anchorY;
-
-            // Forward pass
-            doPass(1, nodes.length, 1, 0.5, 1.0);
-
-            // Backward pass
-            doPass(nodes.length - 1, 0, -1, 0.5, 0.5);
-
-            // Re-pin after each iteration
-            nodes[0].x = anchorX;
-            nodes[0].y = anchorY;
+            for (let i = 1; i <= ti; i++) {
+                const nx = nodes[i].x - nodes[i - 1].x;
+                const ny = nodes[i].y - nodes[i - 1].y;
+                const d = Math.hypot(nx, ny) || 1e-6;
+                const r = SEG_LEN / d;
+                nodes[i].x = nodes[i - 1].x + nx * r;
+                nodes[i].y = nodes[i - 1].y + ny * r;
+            }
         }
     }
 
@@ -257,8 +279,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.rotate(ball.angle);
 
         // Strand parameters
-        const layers = [
-            {count: 18, ro: 1.02, w: 1.4, a: 0.40, hue: '#f9a9c8', tilt: -0.35}, // lighter strands
+        const layers = [{count: 18, ro: 1.02, w: 1.4, a: 0.40, hue: '#f9a9c8', tilt: -0.35}, // lighter strands
             {count: 16, ro: 0.96, w: 1.2, a: 0.30, hue: '#8a2b4f', tilt: 0.55},  // darker in-between
             {count: 12, ro: 0.88, w: 1.0, a: 0.22, hue: '#6b1f3d', tilt: 1.15}   // deeper grooves
         ];
@@ -535,7 +556,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Impart velocity to tail via Verlet: prev = curr - v*dt
             const kick = J_along_exit * 0.02; // tuned
             if (ropeInited) {
-                const tail = ROPE_N - 1;
+                const tail = nodes.length - 1;
                 nodes[tail].x = nodes[tail].x - tx * kick;
                 nodes[tail].y = nodes[tail].y - ty * kick;
             }
@@ -558,39 +579,20 @@ document.addEventListener('DOMContentLoaded', () => {
         // Initialize rope if needed
         if (!ropeInited) initRope(anchorX, anchorY, tx_e, ty_e);
 
-        // Estimate rope tangential speed from the first segment
-        const v_rope_t = ropeTangentialSpeed(dt, tx_e, ty_e);
-
         // Ball surface velocity at anchor (including translation)
         const cv = contactVelocity(ball.vx, ball.vy, ball.spin, nx_e * r_spool, ny_e * r_spool);
         const v_ball_t = cv.cx * tx_e + cv.cy * ty_e;
-        const v_slip = v_ball_t - v_rope_t;
-        const N_spool = N0 + k_spin * Math.abs(ball.spin);
-        const tau_demand = (k_tight * v_slip) * r_spool;
-        const tau_static_max = mu_spool_static * N_spool * r_spool;
-        let sticking = Math.abs(tau_demand) <= tau_static_max;
-        if (!sticking) {
-            // Slip: update L_free and apply kinetic friction impulse on the ball
-            const feed = clamp(v_slip, 0, v_max_feed); // prevent re-spooling (no negative feed)
-            L_free = clamp(L_free + feed * dt, 0, L_total);
-            ensureRopeForLength(L_free);
-            const F_t = mu_spool_dynamic * N_spool * (v_slip > 0 ? -1 : 1); // oppose slip
-            const Jt = F_t * dt;
-            applyImpulseAtPoint(Jt * tx_e, Jt * ty_e, nx_e * r_spool, ny_e * r_spool);
-            // Advance exitAngle by rope speed around the drum
-            exitAngle += (v_rope_t / Math.max(1, r_spool)) * dt;
-        } else {
-            // Stick: drag rope speed to surface speed a bit (visual stability)
-            if (ropeInited) {
-                const corr = (v_ball_t - v_rope_t) * 0.3; // small correction
-                nodes[1].x -= tx_e * corr * dt;
-                nodes[1].y -= ty_e * corr * dt;
-            }
-            // Exit follows surface when stuck
-            exitAngle += ball.spin * dt;
-        }
+        // One-way coupling: rope follows yarn, never affects it.
+        // Feed rope out when the surface moves along +tangent; never re-spool.
+        const feed = clamp(v_ball_t, 0, v_max_feed);
+        L_free = clamp(L_free + feed * dt, 0, L_total);
+        ensureRopeForLength(L_free);
+        // Exit point simply rides with the ball's spin (no back-reaction from rope).
+        exitAngle += ball.spin * dt;
+        // For UI color: "sticking" means not feeding this frame
+        const sticking = feed < 1e-3;
 
-        // Rope dynamics (Verlet)
+        // Rope dynamics: integrate under gravity, then solve IK rigid rods
         integrateRope(dt);
         satisfyRope(anchorX, anchorY);
 
