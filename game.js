@@ -55,12 +55,16 @@ document.addEventListener('DOMContentLoaded', () => {
     let exitAngle = Math.random() * Math.PI * 2; // local angle on ball
 
     // IK rigid-rod rope (visual-only; one-way coupling)
-    let SEG_LEN = 50;  // target segment length used in constraints
-    const ROPE_ITERS = 5;   // constraint iterations (firmness)
-    const ROPE_DAMP = 0.985; // per-step velocity damping for less rubbery feel
+    let SEG_LEN = 16;  // target segment length used in constraints
+    const ROPE_ITERS = 6;    // a touch firmer for less numeric slop
+    const ROPE_DAMP = 0.992; // higher damping to quell high-freq jiggle
+    const ROPE_SUBSTEPS = 2; // integrate/solve in smaller steps for stability
+    const ANCHOR_SMOOTH = 0.18; // per-frame smoothing toward moving anchor
     const nodes = [];
     let pending_nodes = 0;
     let ropeInited = false;
+    // Smoothed anchor we actually pin to (reduces teleports at the head)
+    let ropeAX = 0, ropeAY = 0;
 
     const w = c.clientWidth, h = c.clientHeight;
 
@@ -106,14 +110,15 @@ document.addEventListener('DOMContentLoaded', () => {
         for (let i = 1; i < nodes.length; i++) { // skip pinned head (i=0)
             const n = nodes[i];
             const vx = (n.x - n.px) * ROPE_DAMP;
-            const vy = (n.y - n.py) * ROPE_DAMP + grav * dt * dt * 0.4;
+            const vy = (n.y - n.py) * ROPE_DAMP + grav * dt * dt * 0.35; // slightly gentler accel -> less ringing
             n.px = n.x;
             n.py = n.y;
             n.x += vx;
             n.y += vy;
             if (n.y > h) {
                 n.y = h;
-                n.py = n.y + vy * 0.5; // bounce damping
+                // kill most of the bounce; keep tiny slip to avoid stickiness
+                n.py = n.y + (n.y - n.py) * 0.2;
             }
         }
     }
@@ -162,6 +167,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 nodes[i].x = nodes[i - 1].x + nx * r;
                 nodes[i].y = nodes[i - 1].y + ny * r;
             }
+        }
+    }
+
+    // Light curvature smoothing to damp zig-zag between constraints
+    function smoothRope(alpha = 0.1) {
+        for (let i = 1; i < nodes.length - 1; i++) {
+            const a = nodes[i - 1], b = nodes[i], c = nodes[i + 1];
+            const mx = (a.x + c.x) * 0.5;
+            const my = (a.y + c.y) * 0.5;
+            b.x += (mx - b.x) * alpha;
+            b.y += (my - b.y) * alpha;
         }
     }
 
@@ -414,20 +430,62 @@ document.addEventListener('DOMContentLoaded', () => {
         return clamp(radius - alpha * (L_total - L), r_core, radius);
     }
 
-    function drawRope() {
-        if (nodes.length < 2) return;
+    function drawRope(ballPX, ballPY) {
+        // Build a *render-only* polyline that begins exactly on the ball,
+        // so visuals stay connected even if IK lags.
+        const n = nodes.length;
+        if (n < 1) return;
+        const P = [{x: ballPX, y: ballPY}, ...nodes]; // virtual head at ball contact
+        const vn = P.length;
+
+        // Helper to get tapered width along the rope [0..1]
+        const colorAt = (i) => (i < 3 ? 'rgba(255,200,220,0.9)' : 'rgba(230,160,190,0.85)');
+
         ctx.lineCap = 'round';
-        for (let i = 1; i < nodes.length; i++) {
-            const t = i / (nodes.length - 1);
-            ctx.strokeStyle = i < 3 ? 'rgba(255,200,220,0.9)' : 'rgba(230,160,190,0.85)';
-            ctx.lineWidth = 3.1 * (1 - 0.65 * t); // thicker + gentle taper (from prior tweak)
+        ctx.lineJoin = 'round';
+        ctx.miterLimit = 2;
+
+        if (vn === 2) {
+            // Simple 2-point rope
+            ctx.strokeStyle = colorAt(1);
             ctx.beginPath();
-            ctx.moveTo(nodes[i - 1].x, nodes[i - 1].y);
-            ctx.lineTo(nodes[i].x, nodes[i].y);
+            ctx.moveTo(P[0].x, P[0].y);
+            ctx.lineTo(P[1].x, P[1].y);
+            ctx.stroke();
+            return;
+        }
+
+        // Smooth rope via piecewise quadratic Bézier between successive midpoints.
+        // This allows per-segment linewidth/color while keeping a smooth curve.
+        const mid = (a, b) => ({x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5});
+
+        // Start cap: from node0 to midpoint(0,1) with control at node0
+        let m01 = mid(P[0], P[1]);
+        ctx.strokeStyle = colorAt(1);
+        ctx.beginPath();
+        ctx.moveTo(P[0].x, P[0].y);
+        ctx.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
+        ctx.stroke();
+
+        // Middle smoothed segments
+        for (let i = 1; i <= vn - 2; i++) {
+            const mPrev = mid(P[i - 1], P[i]);
+            const mNext = mid(P[i], P[i + 1]);
+            ctx.strokeStyle = colorAt(i);
+            ctx.beginPath();
+            ctx.moveTo(mPrev.x, mPrev.y);
+            ctx.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
             ctx.stroke();
         }
-    }
 
+        // End cap: from midpoint(n-2,n-1) to node(n-1) with control at node(n-1)
+        const mnm1 = mid(P[vn - 2], P[vn - 1]);
+        ctx.strokeStyle = colorAt(vn - 1);
+        ctx.beginPath();
+        ctx.moveTo(mnm1.x, mnm1.y);
+        ctx.quadraticCurveTo(P[vn - 1].x, P[vn - 1].y, P[vn - 1].x, P[vn - 1].y);
+        ctx.stroke();
+    }
 
     function formatMeters(px) {
         const m = px / pxPerMeter;
@@ -511,7 +569,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const dx = mouse.x - ball.x;
         const dy = mouse.y - ball.y;
         const dist = Math.hypot(dx, dy);
-        let releasedThisFrame = false;
         if (dist < radius + 2 && hitCooldown <= 0) {
             // Unit vector from ball to mouse
             let nx = dx / (dist || 1);
@@ -563,7 +620,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (dL > 0) {
                 L_free = clamp(L_free + dL, 0, L_total);
-                releasedThisFrame = true;
                 ensureRopeForLength(L_free);
             }
             // Optional: nudge exitAngle toward the hit angle (local coords)
@@ -582,17 +638,28 @@ document.addEventListener('DOMContentLoaded', () => {
         const tx_e = -ny_e, ty_e = nx_e;
         const anchorX = ball.x + nx_e * r_spool;
         const anchorY = ball.y + ny_e * r_spool;
-        // Initialize rope if needed
-        if (!ropeInited) initRope(anchorX, anchorY, tx_e, ty_e);
+        // Smooth the anchor motion to reduce head jitter
+        if (!ropeInited) {
+            // Initialize rope if needed
+            initRope(anchorX, anchorY, tx_e, ty_e);
+            ropeAX = anchorX;
+            ropeAY = anchorY;
+        }
+        const lerpA = 1 - Math.pow(1 - ANCHOR_SMOOTH, Math.max(1, (now - (last - 1000 * dt)) / 16.666));
+        ropeAX += (anchorX - ropeAX) * lerpA;
+        ropeAY += (anchorY - ropeAY) * lerpA;
 
         // Exit point simply rides with the ball's spin (no back-reaction from rope).
         exitAngle += ball.spin * dt;
-        // For UI color: "sticking" means no release this frame
-        const sticking = !releasedThisFrame;
 
-        // Rope dynamics: integrate under gravity, then solve IK rigid rods
-        integrateRope(dt);
-        satisfyRope(anchorX, anchorY);
+        // Rope dynamics: substep integrate under gravity, solve IK, then smooth curvature
+        const steps = Math.max(1, ROPE_SUBSTEPS);
+        const dts = dt / steps;
+        for (let s = 0; s < steps; s++) {
+            integrateRope(dts);
+            satisfyRope(ropeAX, ropeAY);
+            smoothRope(0.10);
+        }
 
         // Render
         ctx.clearRect(0, 0, c.clientWidth, c.clientHeight);
@@ -609,15 +676,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.stroke();
 
         // Draw rope and a tiny stick/slip indicator at the anchor
-        drawRope();
+        drawRope(ball.x + nx_e * radius, ball.y + ny_e * radius);
         ctx.save();
-        ctx.strokeStyle = sticking ? 'rgba(120,255,160,0.8)' : 'rgba(255,140,120,0.9)';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(anchorX, anchorY);
-        ctx.lineTo(anchorX + tx_e * 18, anchorY + ty_e * 18);
-        ctx.stroke();
-        ctx.restore();
 
         // UI meter
         ctx.fillStyle = 'rgba(255,255,255,0.85)';
