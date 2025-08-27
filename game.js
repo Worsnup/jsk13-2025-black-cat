@@ -221,7 +221,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Ball state
     const ball = {
-        x: c.clientWidth * 0.5, y: c.clientHeight * 0.25, vx: 140 * (Math.random() * 2 - 1), vy: 0, angle: 0,   // rotation around Z (radians)
+        x: w * 0.5, y: h * 0.25, vx: 140 * (Math.random() * 2 - 1), vy: 0, angle: 0,   // rotation around Z (radians)
         spin: 0     // angular velocity (rad/s)
     };
 
@@ -267,7 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Drawing the yarn ball
     function drawYarn(x, y, r) {
         // Contact shadow (soft, stronger near contact)
-        const groundY = c.clientHeight;
+        const groundY = h;
         const distToGround = Math.max(0, groundY - (y + r));
         const contactT = 1 - Math.max(0, Math.min(1, distToGround / (r * 1.2)));
         const shadowAlpha = 0.15 + 0.25 * contactT;
@@ -703,17 +703,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Render
-        ctx.clearRect(0, 0, c.clientWidth, c.clientHeight);
+        ctx.clearRect(0, 0, w, h);
         // Background
         ctx.fillStyle = '#36a';
-        ctx.fillRect(0, 0, c.clientWidth, c.clientHeight);
+        ctx.fillRect(0, 0, w, h);
 
         // Ground line for reference
         ctx.strokeStyle = 'rgba(255,255,255,0.08)';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(0, c.clientHeight - 1);
-        ctx.lineTo(c.clientWidth, c.clientHeight - 1);
+        ctx.moveTo(0, h - 1);
+        ctx.lineTo(w, h - 1);
         ctx.stroke();
 
         // Draw rope and a tiny stick/slip indicator at the anchor
