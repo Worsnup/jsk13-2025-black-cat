@@ -57,17 +57,117 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Short Verlet rope (visual)
     const ROPE_N = 14;
-    const rope = new Array(ROPE_N).fill(0).map(() => ({x: 0, y: 0}));
-    const ropePrev = new Array(ROPE_N).fill(0).map(() => ({x: 0, y: 0}));
+    const SEG_LEN_MIN = 6;   // minimum segment length
+    const SEG_LEN_MAX = 14;  // keep segments within this visual range
+    let SEG_LEN = 10;  // target segment length used in constraints
+    const ROPE_ITERS = 5;   // constraint iterations (firmness)
+    const ROPE_DAMP = 0.985; // per-step velocity damping for less rubbery feel
+    const nodes = [];
     let ropeInited = false;
+
+    function initRope(anchorX, anchorY, tx, ty) {
+        nodes.length = 0;
+        // Head pinned at anchor + one tail node
+        const tailX = anchorX + tx * SEG_LEN;
+        const tailY = anchorY + ty * SEG_LEN + 2; // tiny sag
+        nodes.push({x: anchorX, y: anchorY, px: anchorX, py: anchorY});
+        nodes.push({x: tailX, y: tailY, px: tailX, py: tailY});
+        ropeInited = true;
+    }
+
+    function targetCountForLength(L) {
+        // +1 because count is nodes, segments = nodes-1
+        const segsNeeded = Math.max(1, Math.floor(L / SEG_LEN));
+        return segsNeeded + 1;
+    }
+
+    function addTailSegment() {
+        // Duplicate last node to extend, then immediately space it one seg-length away
+        const n = nodes.length;
+        const a = nodes[n - 2]; // second last
+        const b = nodes[n - 1]; // last (tail)
+        // Direction from a->b
+        let dx = b.x - a.x, dy = b.y - a.y;
+        const d = Math.hypot(dx, dy) || 1;
+        dx /= d;
+        dy /= d;
+        // New node positioned continuing the ray by SEG_LEN
+        const nx = b.x + dx * SEG_LEN;
+        const ny = b.y + dy * SEG_LEN;
+        nodes.push({x: nx, y: ny, px: nx, py: ny});
+    }
+
+    function ensureRopeForLength(L) {
+        // keep SEG_LEN in [min,max] as rope grows (optional smoothing)
+        SEG_LEN = clamp(SEG_LEN, SEG_LEN_MIN, SEG_LEN_MAX);
+
+        const target = targetCountForLength(L);
+        // Only grow; never shrink (no re-spool)
+        while (nodes.length < target) addTailSegment();
+    }
+
+    function integrateRope(dt) {
+        for (let i = 1; i < nodes.length; i++) { // skip pinned head (i=0)
+            const n = nodes[i];
+            const vx = (n.x - n.px) * ROPE_DAMP;
+            const vy = (n.y - n.py) * ROPE_DAMP + grav * dt * dt * 0.4;
+            n.px = n.x;
+            n.py = n.y;
+            n.x += vx;
+            n.y += vy;
+        }
+    }
+
+    function doPass(fromIndex, toIndex, step, moveA, moveB) {
+        for (let i = fromIndex; i !== toIndex; i += step) {
+            const a = nodes[i - 1], b = nodes[i];
+            let dx = b.x - a.x, dy = b.y - a.y;
+            let d = Math.hypot(dx, dy) || 1e-6;
+            const diff = (d - SEG_LEN) / d;
+            if (i - 1 !== 0) {
+                a.x += dx * diff * moveA;
+                a.y += dy * diff * moveA;
+            }
+            b.x -= dx * diff * moveB;
+            b.y -= dy * diff * moveB;
+        }
+    }
+
+    function satisfyRope(anchorX, anchorY) {
+        // Pin head
+        nodes[0].x = anchorX;
+        nodes[0].y = anchorY;
+        nodes[0].px = anchorX;
+        nodes[0].py = anchorY;
+
+        for (let iter = 0; iter < ROPE_ITERS; iter++) {
+            // Head stays pinned each outer iteration
+            nodes[0].x = anchorX;
+            nodes[0].y = anchorY;
+
+            // Forward pass
+            doPass(1, nodes.length, 1, 0.5, 1.0);
+
+            // Backward pass
+            doPass(nodes.length - 1, 0, -1, 0.5, 0.5);
+
+            // Re-pin after each iteration
+            nodes[0].x = anchorX;
+            nodes[0].y = anchorY;
+        }
+    }
+
+    function ropeTangentialSpeed(dt, tx_e, ty_e) {
+        if (nodes.length < 2) return 0;
+        const n1 = nodes[1];
+        const vx1 = (n1.x - n1.px) / Math.max(1e-6, dt);
+        const vy1 = (n1.y - n1.py) / Math.max(1e-6, dt);
+        return vx1 * tx_e + vy1 * ty_e;
+    }
 
     // Ball state
     const ball = {
-        x: c.clientWidth * 0.5,
-        y: c.clientHeight * 0.25,
-        vx: 140 * (Math.random() * 2 - 1),
-        vy: 0,
-        angle: 0,   // rotation around Z (radians)
+        x: c.clientWidth * 0.5, y: c.clientHeight * 0.25, vx: 140 * (Math.random() * 2 - 1), vy: 0, angle: 0,   // rotation around Z (radians)
         spin: 0     // angular velocity (rad/s)
     };
 
@@ -316,18 +416,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function drawRope() {
-        // thickness fades toward tail
+        if (nodes.length < 2) return;
         ctx.lineCap = 'round';
-        for (let i = 1; i < ROPE_N; i++) {
-            const t = i / (ROPE_N - 1);
+        for (let i = 1; i < nodes.length; i++) {
+            const t = i / (nodes.length - 1);
             ctx.strokeStyle = i < 3 ? 'rgba(255,200,220,0.9)' : 'rgba(230,160,190,0.85)';
-            ctx.lineWidth = 3.1 * (1 - 0.65 * t);
+            ctx.lineWidth = 3.1 * (1 - 0.65 * t); // thicker + gentle taper (from prior tweak)
             ctx.beginPath();
-            ctx.moveTo(rope[i - 1].x, rope[i - 1].y);
-            ctx.lineTo(rope[i].x, rope[i].y);
+            ctx.moveTo(nodes[i - 1].x, nodes[i - 1].y);
+            ctx.lineTo(nodes[i].x, nodes[i].y);
             ctx.stroke();
         }
     }
+
 
     function formatMeters(px) {
         const m = px / pxPerMeter;
@@ -435,8 +536,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const kick = J_along_exit * 0.02; // tuned
             if (ropeInited) {
                 const tail = ROPE_N - 1;
-                ropePrev[tail].x = rope[tail].x - tx * kick;
-                ropePrev[tail].y = rope[tail].y - ty * kick;
+                nodes[tail].x = nodes[tail].x - tx * kick;
+                nodes[tail].y = nodes[tail].y - ty * kick;
             }
             // Optional: nudge exitAngle toward the hit angle (local coords)
             const hitLocal = Math.atan2(ny, nx) - ball.angle;
@@ -455,23 +556,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const anchorX = ball.x + nx_e * r_spool;
         const anchorY = ball.y + ny_e * r_spool;
         // Initialize rope if needed
-        if (!ropeInited) {
-            const targetLen0 = Math.max(6, L_free / (ROPE_N - 1));
-            for (let i = 0; i < ROPE_N; i++) {
-                rope[i].x = anchorX + tx_e * targetLen0 * i;
-                rope[i].y = anchorY + ty_e * targetLen0 * i + 2 * i; // slight sag
-                ropePrev[i].x = rope[i].x;
-                ropePrev[i].y = rope[i].y;
-            }
-            ropeInited = true;
-        }
+        if (!ropeInited) initRope(anchorX, anchorY, tx_e, ty_e);
+
         // Estimate rope tangential speed from the first segment
-        let v_rope_t = 0;
-        if (ropeInited) {
-            const vx1 = (rope[1].x - ropePrev[1].x) / Math.max(1e-6, dt);
-            const vy1 = (rope[1].y - ropePrev[1].y) / Math.max(1e-6, dt);
-            v_rope_t = vx1 * tx_e + vy1 * ty_e;
-        }
+        const v_rope_t = ropeTangentialSpeed(dt, tx_e, ty_e);
+
         // Ball surface velocity at anchor (including translation)
         const cv = contactVelocity(ball.vx, ball.vy, ball.spin, nx_e * r_spool, ny_e * r_spool);
         const v_ball_t = cv.cx * tx_e + cv.cy * ty_e;
@@ -484,6 +573,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Slip: update L_free and apply kinetic friction impulse on the ball
             const feed = clamp(v_slip, 0, v_max_feed); // prevent re-spooling (no negative feed)
             L_free = clamp(L_free + feed * dt, 0, L_total);
+            ensureRopeForLength(L_free);
             const F_t = mu_spool_dynamic * N_spool * (v_slip > 0 ? -1 : 1); // oppose slip
             const Jt = F_t * dt;
             applyImpulseAtPoint(Jt * tx_e, Jt * ty_e, nx_e * r_spool, ny_e * r_spool);
@@ -493,60 +583,16 @@ document.addEventListener('DOMContentLoaded', () => {
             // Stick: drag rope speed to surface speed a bit (visual stability)
             if (ropeInited) {
                 const corr = (v_ball_t - v_rope_t) * 0.3; // small correction
-                ropePrev[1].x -= tx_e * corr * dt;
-                ropePrev[1].y -= ty_e * corr * dt;
+                nodes[1].x -= tx_e * corr * dt;
+                nodes[1].y -= ty_e * corr * dt;
             }
             // Exit follows surface when stuck
             exitAngle += ball.spin * dt;
         }
 
         // Rope dynamics (Verlet)
-        const damp = 0.95;
-        for (let i = 1; i < ROPE_N; i++) {
-            const x = rope[i].x, y = rope[i].y;
-            const px = ropePrev[i].x, py = ropePrev[i].y;
-            let vx = (x - px) * damp;
-            let vy = (y - py) * damp + grav * dt * dt * 0.4; // lightweight gravity
-            ropePrev[i].x = x;
-            ropePrev[i].y = y;
-            rope[i].x = x + vx;
-            rope[i].y = y + vy;
-        }
-        // Pin head to anchor
-        rope[0].x = anchorX;
-        rope[0].y = anchorY;
-        ropePrev[0].x = anchorX;
-        ropePrev[0].y = anchorY;
-        // Enforce segment lengths to approximate L_free
-        const targetLen = Math.max(4, L_free / (ROPE_N - 1));
-        for (let iter = 0; iter < 5; iter++) {
-            // forward
-            rope[0].x = anchorX;
-            rope[0].y = anchorY;
-            for (let i = 1; i < ROPE_N; i++) {
-                let dxs = rope[i].x - rope[i - 1].x;
-                let dys = rope[i].y - rope[i - 1].y;
-                let d = Math.hypot(dxs, dys) || 1e-6;
-                const diff = (d - targetLen) / d;
-                rope[i].x -= dxs * diff;
-                rope[i].y -= dys * diff;
-            }
-            // backward
-            for (let i = ROPE_N - 1; i > 0; i--) {
-                let dxs = rope[i].x - rope[i - 1].x;
-                let dys = rope[i].y - rope[i - 1].y;
-                let d = Math.hypot(dxs, dys) || 1e-6;
-                const diff = (d - targetLen) / d;
-                if (i - 1 !== 0) {
-                    rope[i - 1].x += dxs * diff * 0.5;
-                    rope[i - 1].y += dys * diff * 0.5;
-                }
-                rope[i].x -= dxs * diff * 0.5;
-                rope[i].y -= dys * diff * 0.5;
-                rope[0].x = anchorX;
-                rope[0].y = anchorY; // repin
-            }
-        }
+        integrateRope(dt);
+        satisfyRope(anchorX, anchorY);
 
         // Render
         ctx.clearRect(0, 0, c.clientWidth, c.clientHeight);
