@@ -45,24 +45,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const alpha = (radius - r_core) / L_total; // maps L_total -> r_core
 
     // Friction / capstan-like parameters
-    const mu_spool_static = 0.5;
-    const mu_spool_dynamic = 0.35;
-    const N0 = 5 * mass * grav;             // baseline normal force proxy
-    const k_spin = 0.8 * mass * grav * 0.001; // spin contribution to normal (tuned small)
-    const k_tight = 10;                     // how strongly rope tries to match surface speed
-    const v_max_feed = 800;                 // px/s cap for feed rate
+    const v_max_feed = 2400;                 // px/s cap for feed rate
+    // Hit-driven release tuning (convert dynamics -> length)
+    const k_release_impulse = 0.015;        // px per unit impulse magnitude
+    const k_release_angle = 40;           // px per radian of velocity angle change
+    const k_release_momentum = 0.035;        // px per unit increase in |p| (= m*|v|)
 
     // Exit state
     let exitAngle = Math.random() * Math.PI * 2; // local angle on ball
 
     // IK rigid-rod rope (visual-only; one-way coupling)
-    const SEG_LEN_MIN = 6;   // minimum segment length
-    const SEG_LEN_MAX = 14;  // keep segments within this visual range
-    let SEG_LEN = 10;  // target segment length used in constraints
+    let SEG_LEN = 50;  // target segment length used in constraints
     const ROPE_ITERS = 5;   // constraint iterations (firmness)
     const ROPE_DAMP = 0.985; // per-step velocity damping for less rubbery feel
     const nodes = [];
+    let pending_nodes = 0;
     let ropeInited = false;
+
+    const w = c.clientWidth, h = c.clientHeight;
 
     function initRope(anchorX, anchorY, tx, ty) {
         nodes.length = 0;
@@ -97,12 +97,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function ensureRopeForLength(L) {
-        // keep SEG_LEN in [min,max] as rope grows (optional smoothing)
-        SEG_LEN = clamp(SEG_LEN, SEG_LEN_MIN, SEG_LEN_MAX);
-
         const target = targetCountForLength(L);
         // Only grow; never shrink (no re-spool)
-        while (nodes.length < target) addTailSegment();
+        pending_nodes = target - nodes.length;
     }
 
     function integrateRope(dt) {
@@ -114,21 +111,10 @@ document.addEventListener('DOMContentLoaded', () => {
             n.py = n.y;
             n.x += vx;
             n.y += vy;
-        }
-    }
-
-    function doPass(fromIndex, toIndex, step, moveA, moveB) {
-        for (let i = fromIndex; i !== toIndex; i += step) {
-            const a = nodes[i - 1], b = nodes[i];
-            let dx = b.x - a.x, dy = b.y - a.y;
-            let d = Math.hypot(dx, dy) || 1e-6;
-            const diff = (d - SEG_LEN) / d;
-            if (i - 1 !== 0) {
-                a.x += dx * diff * moveA;
-                a.y += dy * diff * moveA;
+            if (n.y > h) {
+                n.y = h;
+                n.py = n.y + vy * 0.5; // bounce damping
             }
-            b.x -= dx * diff * moveB;
-            b.y -= dy * diff * moveB;
         }
     }
 
@@ -177,14 +163,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 nodes[i].y = nodes[i - 1].y + ny * r;
             }
         }
-    }
-
-    function ropeTangentialSpeed(dt, tx_e, ty_e) {
-        if (nodes.length < 2) return 0;
-        const n1 = nodes[1];
-        const vx1 = (n1.x - n1.px) / Math.max(1e-6, dt);
-        const vy1 = (n1.y - n1.py) / Math.max(1e-6, dt);
-        return vx1 * tx_e + vy1 * ty_e;
     }
 
     // Ball state
@@ -460,13 +438,16 @@ document.addEventListener('DOMContentLoaded', () => {
     let last = performance.now();
 
     function step(now) {
+        if (pending_nodes > 0) {
+            addTailSegment()
+            pending_nodes--;
+        }
+
         const dt = clamp((now - last) / 1000, 0, 0.033); // clamp to ~30 FPS step for stability
         last = now;
 
         // Update cooldown
         hitCooldown = Math.max(0, hitCooldown - dt);
-
-        const w = c.clientWidth, h = c.clientHeight;
 
         // Apply gravity
         ball.vy += grav * dt;
@@ -530,10 +511,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const dx = mouse.x - ball.x;
         const dy = mouse.y - ball.y;
         const dist = Math.hypot(dx, dy);
+        let releasedThisFrame = false;
         if (dist < radius + 2 && hitCooldown <= 0) {
             // Unit vector from ball to mouse
             let nx = dx / (dist || 1);
             let ny = dy / (dist || 1);
+
+            // --- Pre-hit state snapshots for release computation
+            const vBefore = Math.hypot(ball.vx, ball.vy);
+            const angBefore = Math.atan2(ball.vy, ball.vx);
 
             // Approach speed along n (mouse moving into the ball gives bigger hit)
             const approach = -(nx * mvx + ny * mvy); // >0 if cursor moving into the center
@@ -560,6 +546,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 nodes[tail].x = nodes[tail].x - tx * kick;
                 nodes[tail].y = nodes[tail].y - ty * kick;
             }
+
+            // --- Post-hit state for release computation
+            const vAfter = Math.hypot(ball.vx, ball.vy);
+            const angAfter = Math.atan2(ball.vy, ball.vx);
+            // Smallest signed angle difference
+            let dTheta = angAfter - angBefore;
+            dTheta = ((dTheta + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+            const dP = mass * Math.max(0, vAfter - vBefore); // only count momentum increases
+            const Jmag = Math.hypot(Jx, Jy);
+
+            // Convert dynamics (impulse/angle/momentum) to release length
+            let dL = k_release_impulse * Jmag + k_release_angle * Math.abs(dTheta) + k_release_momentum * dP;
+            // Hard cap per hit using existing velocity cap scale
+            dL = clamp(dL, 0, v_max_feed * 0.25);
+
+            if (dL > 0) {
+                L_free = clamp(L_free + dL, 0, L_total);
+                releasedThisFrame = true;
+                ensureRopeForLength(L_free);
+            }
             // Optional: nudge exitAngle toward the hit angle (local coords)
             const hitLocal = Math.atan2(ny, nx) - ball.angle;
             let dAng = ((hitLocal - exitAngle + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
@@ -568,7 +574,7 @@ document.addEventListener('DOMContentLoaded', () => {
             hitCooldown = 0.09; // short cooldown to avoid continuous pushing
         }
 
-        // Spool mechanics: stick/slip and length update
+        // Spool mechanics: compute anchor and tangent (release occurs only on hit above)
         // Compute anchor and tangent based on current exitAngle & wound radius
         const r_spool = r_spool_of(L_free);
         const worldExitAngle2 = exitAngle + ball.angle;
@@ -579,18 +585,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Initialize rope if needed
         if (!ropeInited) initRope(anchorX, anchorY, tx_e, ty_e);
 
-        // Ball surface velocity at anchor (including translation)
-        const cv = contactVelocity(ball.vx, ball.vy, ball.spin, nx_e * r_spool, ny_e * r_spool);
-        const v_ball_t = cv.cx * tx_e + cv.cy * ty_e;
-        // One-way coupling: rope follows yarn, never affects it.
-        // Feed rope out when the surface moves along +tangent; never re-spool.
-        const feed = clamp(v_ball_t, 0, v_max_feed);
-        L_free = clamp(L_free + feed * dt, 0, L_total);
-        ensureRopeForLength(L_free);
         // Exit point simply rides with the ball's spin (no back-reaction from rope).
         exitAngle += ball.spin * dt;
-        // For UI color: "sticking" means not feeding this frame
-        const sticking = feed < 1e-3;
+        // For UI color: "sticking" means no release this frame
+        const sticking = !releasedThisFrame;
 
         // Rope dynamics: integrate under gravity, then solve IK rigid rods
         integrateRope(dt);
