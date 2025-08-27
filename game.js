@@ -25,14 +25,17 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('resize', resize);
     resize();
 
-    // World params
-    const grav = 1200;      // px/s^2
-    const rest = 0.72;      // bounciness
-    const wallRest = 0.6;   // side bounciness
-    const radius = 40;      // yarn radius in px
-    const groundEps = 0.75; // contact tolerance in px
-    const slideFriction = 0.9; // sliding friction scalar on bounce (0..1)
+    // ===== World params =====
+    const grav = 1200;        // px/s^2
+    const rest = 0.72;        // coefficient of restitution (floor/ceiling)
+    const wallRest = 0.6;     // side restitution
+    const muGround = 0.6;     // Coulomb friction (floor/ceiling) — dimensionless
+    const muWall = 0.5;       // Coulomb friction (walls)
+    const radius = 40;        // yarn radius in px
 
+    // Rigid body params (solid sphere about center: I = 2/5 m r^2)
+    const mass = 1;           // arbitrary units — only ratios matter here
+    const inertia = (2 / 5) * mass * radius * radius;
 
     // Ball state
     const ball = {
@@ -81,6 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Utility
     const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const cross2 = (ax, ay, bx, by) => ax * by - ay * bx; // 2D scalar cross
 
     // Drawing the yarn ball
     function drawYarn(x, y, r) {
@@ -220,7 +224,70 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.stroke();
     }
 
-    // Physics integration
+    // ===== Impulse-based collisions preserving linear & angular momentum =====
+    function contactVelocity(vx, vy, omega, rx, ry) {
+        // velocity of contact point: v + w x r
+        const cx = vx + (-omega * ry);
+        const cy = vy + (omega * rx);
+        return {cx, cy};
+    }
+
+    function applyImpulseAtPoint(Jx, Jy, rx, ry) {
+        // Linear
+        ball.vx += Jx / mass;
+        ball.vy += Jy / mass;
+        // Angular (about COM): Δω = (r × J)/I
+        const torqueZ = cross2(rx, ry, Jx, Jy);
+        ball.spin += torqueZ / inertia;
+    }
+
+    function resolvePlaneContact(nx, ny, px, py, e, mu) {
+        // nx,ny: unit plane normal pointing INTO the allowed region
+        // p = ball center; r = vector from COM to contact point = -n * radius
+        const rx = -nx * radius;
+        const ry = -ny * radius;
+
+        // Relative velocity at contact
+        const cv = contactVelocity(ball.vx, ball.vy, ball.spin, rx, ry);
+        const vn = cv.cx * nx + cv.cy * ny; // normal component
+        const tx = -ny, ty = nx;            // tangent unit (perp to n)
+
+        // If separating already, skip
+        if (vn >= 0) return;
+
+        // Effective mass terms (denominators)
+        const rn = cross2(rx, ry, nx, ny); // (r × n)_z
+        const rt = cross2(rx, ry, tx, ty); // (r × t)_z
+        const kN = 1 / (1 / mass + (rn * rn) / inertia);
+        const kT = 1 / (1 / mass + (rt * rt) / inertia);
+
+        // Normal impulse enforces restitution on normal relative velocity
+        const Jn = -(1 + e) * vn * kN; // scalar along n
+        applyImpulseAtPoint(Jn * nx, Jn * ny, rx, ry);
+
+        // Recompute contact velocity after normal impulse for correct friction
+        const cv2 = contactVelocity(ball.vx, ball.vy, ball.spin, rx, ry);
+        const vt2 = cv2.cx * tx + cv2.cy * ty;
+
+        // Desired tangential impulse to stick (vt -> 0)
+        let Jt = -vt2 * kT; // along tangent
+        const maxF = mu * Math.abs(Jn);
+        // Clamp to Coulomb cone (sliding if too large)
+        const JtClamped = clamp(Jt, -maxF, maxF);
+        applyImpulseAtPoint(JtClamped * tx, JtClamped * ty, rx, ry);
+    }
+
+    // Position correction to avoid sinking (non-energetic)
+    function positionalCorrection(nx, ny, penetration) {
+        if (penetration <= 0) return;
+        const slop = 0.2; // small tolerance
+        const percent = 0.8; // correction strength
+        const corr = Math.max(0, penetration - slop) * percent;
+        ball.x += nx * corr;
+        ball.y += ny * corr;
+    }
+
+    // ===== Physics integration =====
     let last = performance.now();
 
     function step(now) {
@@ -240,60 +307,36 @@ document.addEventListener('DOMContentLoaded', () => {
         ball.y += ball.vy * dt;
         // Update angular motion
         ball.angle += ball.spin * dt;
-        ball.spin *= 0.996; // air damping
+        // Tiny air damping (optional; set to 1 for perfect energy conservation)
+        const air = 0.996;
+        ball.vx *= air;
+        ball.vy *= air;
+        ball.spin *= air;
 
-        // Collisions: floor and walls
+        // Collisions with world bounds using impulse-based resolution
+        // Floor (y = h)
         if (ball.y + radius > h) {
-            ball.y = h - radius;
-            if (ball.vy > 0) {
-                // Only bounce if moving downward
-                ball.vy *= -rest;
-                // small friction on bounce
-                ball.vx *= slideFriction;
-                // couple linear velocity into spin once per impact
-                ball.spin += (ball.vx / radius) * 0.25;
-            } else {
-                // Cancel tiny upward drift when embedded
-                if (ball.vy > -40) ball.vy = 0;
-            }
+            const penetration = ball.y + radius - h;
+            positionalCorrection(0, -1, penetration);
+            resolvePlaneContact(0, -1, ball.x, ball.y, rest, muGround);
         }
+        // Ceiling (y = 0)
         if (ball.y - radius < 0) {
-            ball.y = radius;
-            if (ball.vy < 0) ball.vy *= -wallRest;
+            const penetration = radius - ball.y;
+            positionalCorrection(0, 1, penetration);
+            resolvePlaneContact(0, 1, ball.x, ball.y, wallRest, muGround);
         }
+        // Left wall (x = 0)
         if (ball.x - radius < 0) {
-            ball.x = radius;
-            ball.vx *= -wallRest;
-            ball.spin *= 0.9;
-        } else if (ball.x + radius > w) {
-            ball.x = w - radius;
-            ball.vx *= -wallRest;
-            ball.spin *= 0.9;
+            const penetration = radius - ball.x;
+            positionalCorrection(1, 0, penetration);
+            resolvePlaneContact(1, 0, ball.x, ball.y, wallRest, muWall);
         }
-
-        // Ground contact rolling model (no-slip convergence + friction)
-        const onGround = (h - (ball.y + radius)) <= groundEps;
-        if (onGround) {
-            // Drive towards rolling without slipping: vx ≈ spin * r
-            const vt = ball.vx - ball.spin * radius; // contact tangential slip speed
-            // Proportional correction, limited per step
-            const k = clamp(14 * dt, 0, 1); // how aggressively we correct
-            const corr = clamp(-k * vt, -200 * dt, 200 * dt); // avoid huge impulses
-            ball.vx += corr;
-            ball.spin += (corr / radius);
-
-            // Rolling resistance (very small)
-            const rollDamp = Math.exp(-dt * 0.8);
-            ball.spin *= rollDamp;
-
-            // Tiny kinetic friction to bleed residual sliding
-            const slipDamp = Math.exp(-dt * 6);
-            const slip = ball.vx - ball.spin * radius;
-            ball.vx = ball.spin * radius + slip * slipDamp;
-
-            // Prevent sinking jitter
-            if (ball.vy > 0) ball.vy = 0;
-            ball.y = h - radius;
+        // Right wall (x = w)
+        if (ball.x + radius > w) {
+            const penetration = ball.x + radius - w;
+            positionalCorrection(-1, 0, penetration);
+            resolvePlaneContact(-1, 0, ball.x, ball.y, wallRest, muWall);
         }
 
         // If off-screen far below (after energy degraded), reset near top
@@ -302,10 +345,10 @@ document.addEventListener('DOMContentLoaded', () => {
             ball.y = h * 0.25;
             ball.vx = 120 * (Math.random() * 2 - 1);
             ball.vy = -600;
+            ball.spin = 0;
         }
 
-        // Mouse interaction: bounce when cursor intersects
-        // Compute mouse velocity magnitude (for flicks)
+        // Mouse interaction: apply a physically consistent impulse at surface
         const mt = now;
         const mdx = mouse.x - lastMouse.x;
         const mdy = mouse.y - lastMouse.y;
@@ -319,17 +362,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const dy = mouse.y - ball.y;
         const dist = Math.hypot(dx, dy);
         if (dist < radius + 2 && hitCooldown <= 0) {
-            // Direction away from cursor to push ball
+            // Unit vector from ball to mouse
             let nx = dx / (dist || 1);
             let ny = dy / (dist || 1);
-            // Base impulse up and away, stronger if mouse moving into the ball
-            const approach = -(nx * mvx + ny * mvy); // positive if moving towards center
+
+            // Approach speed along n (mouse moving into the ball gives bigger hit)
+            const approach = -(nx * mvx + ny * mvy); // >0 if cursor moving into the center
             const base = 420 + clamp(approach * 0.6, -200, 800);
-            ball.vx += -nx * base;
-            ball.vy += -ny * base - 120; // a bit extra upward bias
-            // add some spin from tangential mouse swipes
-            const tangential = (-ny * mvx + nx * mvy);
-            ball.spin += (tangential / radius) * 0.0025;
+
+            // External impulse vector applied at the surface point nearest the mouse
+            const Jx = -nx * base;
+            const Jy = -ny * base - 120; // slight upward bias is just more fun
+
+            // Apply at contact point r = -n * radius to generate the correct spin
+            const rx = -nx * radius;
+            const ry = -ny * radius;
+            applyImpulseAtPoint(Jx, Jy, rx, ry);
+
             hitCooldown = 0.09; // short cooldown to avoid continuous pushing
         }
 
