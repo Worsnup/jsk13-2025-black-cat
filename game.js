@@ -60,10 +60,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const ROPE_DAMP = 0.992; // higher damping to quell high-freq jiggle
     const ROPE_SUBSTEPS = 2; // integrate/solve in smaller steps for stability
     const ANCHOR_SMOOTH = 0.18; // per-frame smoothing toward moving anchor
+    const IK_UNDER_RELAX = 0.85; // 1 = full correction; <1 softens each constraint move
+    const IK_VEL_DAMP   = 0.90;  // post-IK velocity damping (0.9 = keep 90% of velocity)
     // When unspooling (pending_nodes>0) let the last segments stretch a bit so the rope
     // visually "makes room" for the incoming nodes without pops.
     const GROW_LAG_MAX = 0.10;   // up to +10% longer near the tail
-    const GROW_BIAS_POW = 2.0;   // concentrate extra length toward the tail
+    const GROW_BIAS_POW = 1.0;   // concentrate extra length toward the tail
     const nodes = [];
     let pending_nodes = 0;
     let ropeInited = false;
@@ -114,7 +116,7 @@ document.addEventListener('DOMContentLoaded', () => {
         for (let i = 1; i < nodes.length; i++) { // skip pinned head (i=0)
             const n = nodes[i];
             const vx = (n.x - n.px) * ROPE_DAMP;
-            const vy = (n.y - n.py) * ROPE_DAMP + grav * dt * dt * 0.35; // slightly gentler accel -> less ringing
+            const vy = (n.y - n.py) * ROPE_DAMP + grav * dt * dt; // slightly gentler accel -> less ringing
             n.px = n.x;
             n.py = n.y;
             n.x += vx;
@@ -171,8 +173,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const d = Math.hypot(nx, ny) || 1e-6;
                 // segment i..i+1 has segment index k = i+1
                 const r = segTargetLen(i + 1) / d;
-                nodes[i].x = nodes[i + 1].x - nx * r;
-                nodes[i].y = nodes[i + 1].y - ny * r;
+                const dx = nodes[i + 1].x - nx * r;
+                const dy = nodes[i + 1].y - ny * r;
+                // Under-relaxed move to reduce overshoot
+                nodes[i].x += (dx - nodes[i].x) * IK_UNDER_RELAX;
+                nodes[i].y += (dy - nodes[i].y) * IK_UNDER_RELAX;
             }
             // ----- Backward reach: re-pin head and push chain toward tail
             nodes[0].x = anchorX;
@@ -183,8 +188,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const d = Math.hypot(nx, ny) || 1e-6;
                 // segment i-1..i has segment index k = i
                 const r = segTargetLen(i) / d;
-                nodes[i].x = nodes[i - 1].x + nx * r;
-                nodes[i].y = nodes[i - 1].y + ny * r;
+                const dx = nodes[i - 1].x + nx * r;
+                const dy = nodes[i - 1].y + ny * r;
+                // Under-relaxed move to reduce overshoot
+                nodes[i].x += (dx - nodes[i].x) * IK_UNDER_RELAX;
+                nodes[i].y += (dy - nodes[i].y) * IK_UNDER_RELAX;
             }
         }
     }
@@ -197,6 +205,17 @@ document.addEventListener('DOMContentLoaded', () => {
             const my = (a.y + c.y) * 0.5;
             b.x += (mx - b.x) * alpha;
             b.y += (my - b.y) * alpha;
+        }
+    }
+
+    // Post-IK velocity damping (Provot-style): dampen Verlet velocity after constraints
+    function dampIKVelocities() {
+        for (let i = 1; i < nodes.length; i++) { // keep head pinned/undamped
+            const n = nodes[i];
+            const vx = (n.x - n.px) * IK_VEL_DAMP;
+            const vy = (n.y - n.py) * IK_VEL_DAMP;
+            n.px = n.x - vx;
+            n.py = n.y - vy;
         }
     }
 
@@ -678,6 +697,7 @@ document.addEventListener('DOMContentLoaded', () => {
             integrateRope(dts);
             satisfyRope(ropeAX, ropeAY);
             smoothRope(0.10);
+            dampIKVelocities();
         }
 
         // Render
