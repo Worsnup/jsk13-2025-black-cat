@@ -37,6 +37,30 @@ document.addEventListener('DOMContentLoaded', () => {
     const mass = 1;           // arbitrary units — only ratios matter here
     const inertia = (2 / 5) * mass * radius * radius;
 
+    // ===== Spool / rope params =====
+    const pxPerMeter = 120;                 // for UI formatting only
+    const L_total = 60 * pxPerMeter;        // total yarn length in px (~60 m)
+    let L_free = 0;                         // current unspooled length (px)
+    const r_core = 0.6 * radius;            // minimum wound radius
+    const alpha = (radius - r_core) / L_total; // maps L_total -> r_core
+
+    // Friction / capstan-like parameters
+    const mu_spool_static = 0.5;
+    const mu_spool_dynamic = 0.35;
+    const N0 = 5 * mass * grav;             // baseline normal force proxy
+    const k_spin = 0.8 * mass * grav * 0.001; // spin contribution to normal (tuned small)
+    const k_tight = 10;                     // how strongly rope tries to match surface speed
+    const v_max_feed = 800;                 // px/s cap for feed rate
+
+    // Exit state
+    let exitAngle = Math.random() * Math.PI * 2; // local angle on ball
+
+    // Short Verlet rope (visual)
+    const ROPE_N = 14;
+    const rope = new Array(ROPE_N).fill(0).map(() => ({x: 0, y: 0}));
+    const ropePrev = new Array(ROPE_N).fill(0).map(() => ({x: 0, y: 0}));
+    let ropeInited = false;
+
     // Ball state
     const ball = {
         x: c.clientWidth * 0.5,
@@ -287,6 +311,27 @@ document.addEventListener('DOMContentLoaded', () => {
         ball.y += ny * corr;
     }
 
+    function r_spool_of(L){
+        return clamp(radius - alpha * (L_total - L), r_core, radius);
+    }
+    function drawRope() {
+        // thickness fades toward tail
+        ctx.lineCap = 'round';
+        for (let i = 1; i < ROPE_N; i++) {
+            const t = i / (ROPE_N - 1);
+            ctx.strokeStyle = i < 3 ? 'rgba(255,200,220,0.9)' : 'rgba(230,160,190,0.85)';
+            ctx.lineWidth = 2.5 * (1 - 0.7 * t);
+            ctx.beginPath();
+            ctx.moveTo(rope[i - 1].x, rope[i - 1].y);
+            ctx.lineTo(rope[i].x, rope[i].y);
+            ctx.stroke();
+        }
+    }
+    function formatMeters(px){
+        const m = px / pxPerMeter;
+        return m.toFixed(1) + ' m';
+    }
+
     // ===== Physics integration =====
     let last = performance.now();
 
@@ -379,13 +424,131 @@ document.addEventListener('DOMContentLoaded', () => {
             const ry = -ny * radius;
             applyImpulseAtPoint(Jx, Jy, rx, ry);
 
+            // Spool coupling: project hit impulse along exit tangent and kick rope tail
+            const worldExitAngle = exitAngle + ball.angle;
+            const ex = Math.cos(worldExitAngle), ey = Math.sin(worldExitAngle);
+            const tx = -ey, ty = ex; // tangent at exit
+            const J_along_exit = Jx * tx + Jy * ty;
+            // Impart velocity to tail via Verlet: prev = curr - v*dt
+            const kick = J_along_exit * 0.02; // tuned
+            if (ropeInited) {
+                const tail = ROPE_N - 1;
+                ropePrev[tail].x = rope[tail].x - tx * kick;
+                ropePrev[tail].y = rope[tail].y - ty * kick;
+            }
+            // Optional: nudge exitAngle toward the hit angle (local coords)
+            const hitLocal = Math.atan2(ny, nx) - ball.angle;
+            let dAng = ((hitLocal - exitAngle + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+            exitAngle += dAng * 0.05;
+
             hitCooldown = 0.09; // short cooldown to avoid continuous pushing
+        }
+
+        // Spool mechanics: stick/slip and length update
+        // Compute anchor and tangent based on current exitAngle & wound radius
+        const r_spool = r_spool_of(L_free);
+        const worldExitAngle2 = exitAngle + ball.angle;
+        const nx_e = Math.cos(worldExitAngle2), ny_e = Math.sin(worldExitAngle2);
+        const tx_e = -ny_e, ty_e = nx_e;
+        const anchorX = ball.x + nx_e * r_spool;
+        const anchorY = ball.y + ny_e * r_spool;
+        // Initialize rope if needed
+        if (!ropeInited) {
+            const targetLen0 = Math.max(6, L_free / (ROPE_N - 1));
+            for (let i = 0; i < ROPE_N; i++) {
+                const t = i / (ROPE_N - 1);
+                rope[i].x = anchorX + tx_e * targetLen0 * i;
+                rope[i].y = anchorY + ty_e * targetLen0 * i + 2 * i; // slight sag
+                ropePrev[i].x = rope[i].x;
+                ropePrev[i].y = rope[i].y;
+            }
+            ropeInited = true;
+        }
+        // Estimate rope tangential speed from the first segment
+        let v_rope_t = 0;
+        if (ropeInited) {
+            const vx1 = (rope[1].x - ropePrev[1].x) / Math.max(1e-6, dt);
+            const vy1 = (rope[1].y - ropePrev[1].y) / Math.max(1e-6, dt);
+            v_rope_t = vx1 * tx_e + vy1 * ty_e;
+        }
+        // Ball surface velocity at anchor (including translation)
+        const cv = contactVelocity(ball.vx, ball.vy, ball.spin, nx_e * r_spool, ny_e * r_spool);
+        const v_ball_t = cv.cx * tx_e + cv.cy * ty_e;
+        const v_slip = v_ball_t - v_rope_t;
+        const N_spool = N0 + k_spin * Math.abs(ball.spin);
+        const tau_demand = (k_tight * v_slip) * r_spool;
+        const tau_static_max = mu_spool_static * N_spool * r_spool;
+        let sticking = Math.abs(tau_demand) <= tau_static_max;
+        if (!sticking) {
+            // Slip: update L_free and apply kinetic friction impulse on the ball
+            const feed = clamp(v_slip, -v_max_feed, v_max_feed);
+            L_free = clamp(L_free + feed * dt, 0, L_total);
+            const F_t = mu_spool_dynamic * N_spool * (v_slip > 0 ? -1 : 1); // oppose slip
+            const Jt = F_t * dt;
+            applyImpulseAtPoint(Jt * tx_e, Jt * ty_e, nx_e * r_spool, ny_e * r_spool);
+            // Advance exitAngle by rope speed around the drum
+            exitAngle += (v_rope_t / Math.max(1, r_spool)) * dt;
+        } else {
+            // Stick: drag rope speed to surface speed a bit (visual stability)
+            if (ropeInited) {
+                const desired = v_ball_t;
+                const current = v_rope_t;
+                const corr = (desired - current) * 0.3; // small correction
+                ropePrev[1].x -= tx_e * corr * dt;
+                ropePrev[1].y -= ty_e * corr * dt;
+            }
+            // Exit follows surface when stuck
+            exitAngle += ball.spin * dt;
+        }
+
+        // Rope dynamics (Verlet)
+        const damp = 0.995;
+        for (let i = 1; i < ROPE_N; i++) {
+            const x = rope[i].x, y = rope[i].y;
+            const px = ropePrev[i].x, py = ropePrev[i].y;
+            let vx = (x - px) * damp;
+            let vy = (y - py) * damp + grav * dt * dt * 0.4; // lightweight gravity
+            ropePrev[i].x = x;
+            ropePrev[i].y = y;
+            rope[i].x = x + vx;
+            rope[i].y = y + vy;
+        }
+        // Pin head to anchor
+        rope[0].x = anchorX; rope[0].y = anchorY;
+        ropePrev[0].x = anchorX; ropePrev[0].y = anchorY;
+        // Enforce segment lengths to approximate L_free
+        const targetLen = Math.max(4, L_free / (ROPE_N - 1));
+        for (let iter = 0; iter < 3; iter++) {
+            // forward
+            rope[0].x = anchorX; rope[0].y = anchorY;
+            for (let i = 1; i < ROPE_N; i++) {
+                let dxs = rope[i].x - rope[i - 1].x;
+                let dys = rope[i].y - rope[i - 1].y;
+                let d = Math.hypot(dxs, dys) || 1e-6;
+                const diff = (d - targetLen) / d;
+                rope[i].x -= dxs * diff;
+                rope[i].y -= dys * diff;
+            }
+            // backward
+            for (let i = ROPE_N - 1; i > 0; i--) {
+                let dxs = rope[i].x - rope[i - 1].x;
+                let dys = rope[i].y - rope[i - 1].y;
+                let d = Math.hypot(dxs, dys) || 1e-6;
+                const diff = (d - targetLen) / d;
+                if (i - 1 !== 0) {
+                    rope[i - 1].x += dxs * diff * 0.5;
+                    rope[i - 1].y += dys * diff * 0.5;
+                }
+                rope[i].x -= dxs * diff * 0.5;
+                rope[i].y -= dys * diff * 0.5;
+                rope[0].x = anchorX; rope[0].y = anchorY; // repin
+            }
         }
 
         // Render
         ctx.clearRect(0, 0, c.clientWidth, c.clientHeight);
         // Background
-        ctx.fillStyle = '#36a';
+        ctx.fillStyle = '#111';
         ctx.fillRect(0, 0, c.clientWidth, c.clientHeight);
 
         // Ground line for reference
@@ -396,6 +559,23 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.lineTo(c.clientWidth, c.clientHeight - 1);
         ctx.stroke();
 
+        // Draw rope and a tiny stick/slip indicator at the anchor
+        drawRope();
+        ctx.save();
+        ctx.strokeStyle = sticking ? 'rgba(120,255,160,0.8)' : 'rgba(255,140,120,0.9)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(anchorX, anchorY);
+        ctx.lineTo(anchorX + tx_e * 18, anchorY + ty_e * 18);
+        ctx.stroke();
+        ctx.restore();
+
+        // UI meter
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.font = '14px system-ui, sans-serif';
+        ctx.fillText('yarn: ' + formatMeters(L_free), 12, 20);
+
+        // Draw ball on top
         drawYarn(ball.x, ball.y, radius);
 
         requestAnimationFrame(step);
