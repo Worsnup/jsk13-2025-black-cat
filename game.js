@@ -33,15 +33,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const wallRest = 0.5;
 
     // === Yarn geometry ===
-    const radius = 46;              // disk radius (px)
-    const rCore = radius * 0.45;    // inner core radius (px)
+    const radius = 38;              // disk radius (px)
     const totalLength = 60 * 120;   // 60 m at 120 px/m -> px
-    const SEG_LEN = 8;              // rope segment rest length (px)
+    const TOTAL_POINTS = 500;       // total rope particles (including wound)
     const ROPE_ITERS = 5;           // distance-constraint iterations
     const SUBSTEPS = 2;             // verlet substeps for stability
 
     // Derived counts
-    const TOTAL_POINTS = Math.max(8, Math.floor(totalLength / SEG_LEN) + 1);
+    const SEG_LEN = (totalLength / (TOTAL_POINTS - 1)); // rest length between particles
 
     // ==== Disk (rigid) state (integrated with Verlet) ====
     const world = {w: 0, h: 0};
@@ -65,86 +64,74 @@ document.addEventListener('DOMContentLoaded', () => {
     // Local (disk space) anchors for the wound portion (i >= freeCount). These coordinates are rigidly attached to the disk.
     const woundLocal = new Array(TOTAL_POINTS).fill(0).map(() => ({x: 0, y: 0}));
     // Index of the *first* wound particle in the chain (the one on the surface exit). All indices < freeCount are free.
-    let freeCount = 2;  // start with a short dangling tail
+    let freeCount = 4;  // start with a short dangling tail
     let exitAngle = Math.random() * Math.PI * 2; // where the rope leaves the disk
 
     // ===== Utility =====
     const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-    const lerp = (a, b, t) => a + (b - a) * t;
-
-    // Pseudo-random but deterministic for a given seed
-    function hash(n) {
-        const s = Math.sin(n) * 43758.5453;
-        return s - Math.floor(s);
-    }
-
-    function noise1(t) { // cheap smooth-ish noise
-        const i = Math.floor(t);
-        const f = t - i;
-        const a = hash(i);
-        const b = hash(i + 1);
-        const u = f * f * (3 - 2 * f);
-        return a * (1 - u) + b * u;
-    }
 
     // Build a tangled path inside the disk and sample it at ~SEG_LEN spacing to get local anchors.
     // The first sampled point is on the outer rim at exitAngle; subsequent points wander through the interior.
     function buildWoundPath() {
-        const maxR = radius - 3; // keep strands inside the disk visually
-        const minR = rCore;
+        // New approach: layered great-circle bands with jitter, ensuring near-uniform
+        // spacing and a filled silhouette that matches the old shaded ball look.
+        const maxR = radius - 2;
+        const minR = radius;
 
-        // Path in (r, theta) as a function of t. We deliberately stir multiple frequencies to get a "jumbled" look.
-        const phi1 = Math.random() * Math.PI * 2;
-        const phi2 = Math.random() * Math.PI * 2;
-        const phi3 = Math.random() * Math.PI * 2;
+        const layers = [
+            {tilt: -0.35, count: 2, wobR: 0.06, wobT: 0.20},
+            {tilt: 0.55, count: 2, wobR: 0.05, wobT: 0.18},
+            {tilt: 1.10, count: 2, wobR: 0.05, wobT: 0.15},
+        ];
 
-        function polarAt(t) {
-            // t in [0, T]; we won't rely on its absolute scale, only arc-length sampling
-            const baseTheta = 24 * Math.PI * t;                           // many wraps
-            const twist = 1.3 * Math.sin(6 * t + phi1) + 0.45 * Math.sin(15 * t + phi2);
-            const theta = baseTheta + twist + exitAngle;                  // rotate so path starts near exit
-
-            // Radius oscillates between core and rim with additional wobble
-            const osc = 0.5 + 0.5 * Math.sin(2 * Math.PI * t + phi3);
-            const wob = 0.15 * (noise1(t * 3.1) - 0.5) + 0.08 * Math.sin(9.0 * t + phi2);
-            const r = clamp(lerp(minR, maxR, clamp(osc + wob, 0, 1)), minR, maxR);
-            return {r, theta};
-        }
-
-        // Convert polar to local XY
-        const toXY = (p) => ({x: p.r * Math.cos(p.theta), y: p.r * Math.sin(p.theta)});
-
-        // Arc-length sample
         const locals = [];
-        // Seed first point explicitly on the rim at exitAngle (rope exit)
-        locals.push({x: maxR * Math.cos(exitAngle), y: maxR * Math.sin(exitAngle)});
-        let last = locals[0];
 
-        // March t forward gathering points until we fill the whole chain
-        let t = 0, dt = 0.003; // small step for good length accuracy
-        while (locals.length < TOTAL_POINTS) {
-            t += dt;
-            const p = toXY(polarAt(t));
-            const dx = p.x - last.x, dy = p.y - last.y;
-            const d = Math.hypot(dx, dy);
-            if (d >= SEG_LEN) {
-                locals.push(p);
-                last = p;
-            }
-            // Just in case, stop after very long param distance and fill randomly (shouldn't happen under normal params)
-            if (t > 200) {
-                // fallback: random point on circle (still within disk)
-                const ang = Math.random() * Math.PI * 2;
-                const rr = lerp(minR, maxR, Math.random());
-                locals.push({x: rr * Math.cos(ang), y: rr * Math.sin(ang)});
+        function pushIfFar(p) {
+            const last = locals[locals.length - 1];
+            if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= SEG_LEN) locals.push(p);
+        }
+
+        // Seed on rim at exitAngle for a clean tail join
+        pushIfFar({x: maxR * Math.cos(exitAngle), y: maxR * Math.sin(exitAngle)});
+
+        // Interleave tilted bands
+        for (const L of layers) {
+            for (let k = 0; k < L.count; k++) {
+                const phase = (k + 0.5) / L.count * Math.PI * 0.7;
+                for (let a = -Math.PI * 0.98; a <= Math.PI * 0.98; a += Math.PI) {
+                    const ca = Math.cos(a), sa = Math.sin(a);
+                    const ct = Math.cos(L.tilt + phase), st = Math.sin(L.tilt + phase);
+                    let x = maxR * (ca * ct - sa * st);
+                    let y = maxR * (ca * st + sa * ct);
+                    // inward bias so we don't leave a donut hole
+                    const t = (a + Math.PI) / (2 * Math.PI);
+                    const inward = 0.25 + 0.75 * Math.sin(t * Math.PI);
+                    const r = maxR - (maxR - minR) * (L.wobR * inward);
+                    const len = Math.hypot(x, y) || 1;
+                    x *= r / len;
+                    y *= r / len;
+                    // small jitter to break perfect bands
+                    const jitter = (Math.sin((a + phase) * 23.71) * 0.5 + 0.5) * L.wobT;
+                    const ang = Math.atan2(y, x) + jitter * 0.15;
+                    const rr = Math.hypot(x, y);
+                    x = rr * Math.cos(ang);
+                    y = rr * Math.sin(ang);
+                    pushIfFar({x, y});
+                }
             }
         }
 
-        // We built from exit outward; we want chain order from exit (surface) -> deep interior,
-        // so the last local becomes the chain end (points[TOTAL_POINTS-1]). That's already true.
+        // Ensure we have enough points; sprinkle interiors if needed
+        while (locals.length < TOTAL_POINTS) {
+            const ang = Math.random() * Math.PI * 2;
+            const rr = minR + (maxR - minR) * Math.random();
+            pushIfFar({x: rr * Math.cos(ang), y: rr * Math.sin(ang)});
+        }
+
         for (let i = 0; i < TOTAL_POINTS; i++) {
-            woundLocal[i].x = locals[i].x;
-            woundLocal[i].y = locals[i].y;
+            const p = locals[i] || locals[locals.length - 1];
+            woundLocal[i].x = p.x;
+            woundLocal[i].y = p.y;
         }
     }
 
@@ -426,145 +413,41 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Free some segments depending on impulse size
         const Jmag = Math.hypot(Jx, Jy);
-        const segs = clamp(Math.floor(Jmag / 250), 1, 8);
+        const segs = clamp(Math.floor(Jmag / 25), 1, 8);
         maybeFreeNext(segs);
 
         hitCooldown = 0.10;
     }
 
     // === Rendering ===
-    function drawTail() {
-        // Render only the free tail portion [0 .. freeCount]
-        if (freeCount < 1) return;
+    function drawYarn() {
+        // if (freeCount < 1) return;
+        const P = points;
+        const n = P.length; // Math.max(2, freeCount + 1);
+        const mid = (a, b) => ({x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5});
+        const PAL = [{a: 0.42, w: 3.0, col: '#f9a9c8'}, {a: 0.32, w: 3.0, col: '#8a2b4f'}, {
+            a: 0.22, w: 3.0, col: '#6b1f3d'
+        }];
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
-        ctx.strokeStyle = 'rgba(235,170,195,0.95)';
-        ctx.lineWidth = 2;
-
-        const P = points;
-        const n = Math.max(2, freeCount + 1);
-        const mid = (a, b) => ({x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5});
-
-        // Start cap
-        let m01 = mid(P[0], P[1]);
-        ctx.beginPath();
-        ctx.moveTo(P[0].x, P[0].y);
-        ctx.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
-        ctx.stroke();
-
-        // Middles up to the head (inclusive)
-        for (let i = 1; i <= n - 2; i++) {
-            const mPrev = mid(P[i - 1], P[i]);
-            const mNext = mid(P[i], P[i + 1]);
-            ctx.beginPath();
-            ctx.moveTo(mPrev.x, mPrev.y);
-            ctx.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
-            ctx.stroke();
-        }
-    }
-
-    // Emulate the ball look by drawing only wound strands with layered strokes, no circle fills.
-    function drawWoundFromRope() {
-        if (freeCount >= TOTAL_POINTS - 1) return; // nothing wound
-
-        // Soft ground shadow (allowed: it's not the ball itself)
-        const r = radius;
-        const groundY = world.h;
-        const distToGround = Math.max(0, groundY - (ball.y + r));
-        const t = 1 - Math.max(0, Math.min(1, distToGround / (r * 1.2)));
-        ctx.save();
-        ctx.globalAlpha = 0.18 + 0.22 * t;
-        ctx.fillStyle = '#000';
-        ctx.beginPath();
-        ctx.ellipse(ball.x, Math.min(groundY - 1, world.h + r * 0.2), r * (0.9 - 0.2 * t), r * (0.25 + 0.2 * t), 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-
-        // Layered strand rendering: light -> mid -> dark
-        const layers = [{a: 0.42, w: 1.6, col: '#f9a9c8'}, {a: 0.32, w: 1.2, col: '#8a2b4f'}, {
-            a: 0.22,
-            w: 1.0,
-            col: '#6b1f3d'
-        }];
-
-        // Precompute lighting
-        const Lx = ball.x - r * 0.45, Ly = ball.y - r * 0.5; // light position (up-left)
-
-        // We walk pairs of wound points and draw short segments with tone depending on facing
-        for (const L of layers) {
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
+        for (const L of PAL) {
             ctx.strokeStyle = L.col;
+            ctx.globalAlpha = L.a;
             ctx.lineWidth = L.w;
-
-            for (let i = freeCount; i < TOTAL_POINTS - 1; i++) {
-                const a = points[i], b = points[i + 1];
-                // skip tiny links to keep density even
-                const dx = b.x - a.x, dy = b.y - a.y;
-                const d = Math.hypot(dx, dy);
-                if (d < 0.5) continue;
-
-                // Strand midpoint shading based on a faux normal (midpoint relative to center)
-                const mx = (a.x + b.x) * 0.5, my = (a.y + b.y) * 0.5;
-                const cx = mx - ball.x, cy = my - ball.y;
-                const rlen = Math.hypot(cx, cy) || 1;
-                const nx = cx / rlen, ny = cy / rlen; // radial normal-ish
-                const lx = Lx - mx, ly = Ly - my;
-                const llen = Math.hypot(lx, ly) || 1;
-                const lnx = lx / llen, lny = ly / llen;
-                // lambert term in [0..1]
-                const lambert = Math.max(0, nx * lnx + ny * lny);
-                const facing = 0.35 + 0.65 * lambert; // brighten when facing light
-
-                // Edge darkening (fabric fresnel): darken near rim
-                const rimT = clamp((rlen - r * 0.6) / (r * 0.4), 0, 1);
-                const fres = 1 - 0.25 * rimT;
-
-                ctx.globalAlpha = L.a * facing * fres;
-
-                // Slight width modulation by foreshortening
-                const viewDot = Math.abs(-ny * (mx - ball.x) + nx * (my - ball.y)) / (r + 1e-6);
-                ctx.lineWidth = L.w * (0.9 + 0.3 * viewDot);
-
+            let m01 = mid(P[0], P[1]);
+            ctx.beginPath();
+            ctx.moveTo(P[0].x, P[0].y);
+            ctx.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
+            ctx.stroke();
+            for (let i = 1; i <= n - 2; i++) {
+                const mPrev = mid(P[i - 1], P[i]);
+                const mNext = mid(P[i], P[i + 1]);
                 ctx.beginPath();
-                ctx.moveTo(a.x, a.y);
-                ctx.lineTo(b.x, b.y);
+                ctx.moveTo(mPrev.x, mPrev.y);
+                ctx.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
                 ctx.stroke();
             }
         }
-
-        // Sparse bright "spec" stitches—short highlights along lit rim directions
-        ctx.strokeStyle = '#ffdbe9';
-        ctx.lineWidth = 1.2;
-        ctx.globalAlpha = 0.18;
-        for (let k = 0; k < 120; k++) {
-            const i = freeCount + ((k * 97) % Math.max(1, (TOTAL_POINTS - 1 - freeCount)));
-            const a = points[i];
-            const dx = a.x - ball.x, dy = a.y - ball.y;
-            const rl = Math.hypot(dx, dy) || 1;
-            if (rl < r * 0.4 || rl > r * 1.02) continue; // near mid-band/rim only
-            const tnx = -dy / rl, tny = dx / rl;
-            const len = 4 + 4 * Math.random();
-            ctx.beginPath();
-            ctx.moveTo(a.x - tnx * len * 0.5, a.y - tny * len * 0.5);
-            ctx.lineTo(a.x + tnx * len * 0.5, a.y + tny * len * 0.5);
-            ctx.stroke();
-        }
-
-        // Subtle interior ambient occlusion via overdrawing darker strands in the lower hemisphere band
-        ctx.strokeStyle = '#401427';
-        ctx.globalAlpha = 0.10;
-        ctx.lineWidth = 1.0;
-        for (let i = freeCount; i < TOTAL_POINTS - 1; i += 2) {
-            const a = points[i], b = points[i + 1];
-            const my = (a.y + b.y) * 0.5;
-            if (my < ball.y) continue; // only bottom half
-            ctx.beginPath();
-            ctx.moveTo(a.x, a.y);
-            ctx.lineTo(b.x, b.y);
-            ctx.stroke();
-        }
-
         ctx.globalAlpha = 1;
     }
 
@@ -614,10 +497,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.lineTo(world.w, world.h - 1);
         ctx.stroke();
 
-        // wound ball look (only rope-based strokes)
-        drawWoundFromRope();
-        // free tail on top
-        drawTail();
+        drawYarn();
 
         // UI: free length
         const freeLen = SEG_LEN * (freeCount - 1);
