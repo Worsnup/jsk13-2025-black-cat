@@ -1,310 +1,299 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // === Canvas bootstrap ===
-    const $ = document, W = window, B = $.body, C = $.createElement('canvas'), X = C.getContext('2d');
-    (document.getElementById('content') || B).innerHTML = '';
-    Object.assign(B.style, {margin: '0', overflow: 'hidden'});
-    Object.assign(C.style, {display: 'block', touchAction: 'none'});
-    B.appendChild(C);
+  // === Canvas bootstrap ===
+  const $ = document, W = window, B = $.body, C = $.createElement('canvas'), X = C.getContext('2d');
+  (document.getElementById('content') || B).innerHTML = '';
+  Object.assign(B.style, {margin: '0', overflow: 'hidden'});
+  Object.assign(C.style, {display: 'block', touchAction: 'none'});
+  B.appendChild(C);
 
-    // === Shorthand math ===
-    const {max, min, cos, sin, PI, hypot, random, atan2} = Math;
+  // === Shorthand math ===
+  const {max, min, cos, sin, PI, hypot, random, atan2} = Math;
 
-    // === World / DPI ===
-    const DPR = min(2, W.devicePixelRatio || 1), world = {w: 0, h: 0};
-    const setTF = () => X.setTransform(DPR, 0, 0, DPR, 0, 0);
-    const resize = () => {
-        const w = W.innerWidth || $.documentElement.clientWidth;
-        const h = W.innerHeight || $.documentElement.clientHeight;
-        Object.assign(C.style, {width: w + 'px', height: h + 'px'});
-        C.width = (w * DPR) | 0;
-        C.height = (h * DPR) | 0;
-        setTF();
-        world.w = C.clientWidth;
-        world.h = C.clientHeight;
+  // === World / DPI ===
+  const DPR = min(2, W.devicePixelRatio || 1), world = {w: 0, h: 0};
+  const resize = () => {
+    const w = W.innerWidth || $.documentElement.clientWidth, h = W.innerHeight || $.documentElement.clientHeight;
+    Object.assign(C.style, {width: w + 'px', height: h + 'px'});
+    C.width = (w * DPR) | 0;
+    C.height = (h * DPR) | 0;
+    X.setTransform(DPR, 0, 0, DPR, 0, 0);
+    world.w = C.clientWidth;
+    world.h = C.clientHeight;
+  };
+  W.addEventListener('resize', resize);
+  resize();
+
+  // === Tunables ===
+  const GRAV = 1600, REST = .55, GFRIC = .015, AIR = .997, WALL = .5;
+  const R = 38, TOTAL = 500, ITERS = 5, SUB = 2, pxPerM = 120, SEG = (60 * pxPerM) / (TOTAL - 1);
+
+  // === Disk ===
+  const ball = {
+    x: world.w * .5, y: world.h * .25, px: world.w * .5 - 120 * (1 / 60), py: world.h * .25, angle: 0, grounded: false
+  };
+
+  // === Rope ===
+  const P = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0, px: 0, py: 0}));
+  const woundLocal = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0}));
+  let freeCount = 1;
+
+  const toWorld = (lx, ly, ca, sa, cx, cy) => ({x: cx + (lx * ca - ly * sa), y: cy + (lx * sa + ly * ca)});
+  const clamp = (v, a, b) => max(a, min(b, v));
+
+  // Build interior anchors for the wound portion
+  function buildWoundPath() {
+    const inner = R - 2, outer = R, locals = [];
+    const layers = [{tilt: -.35, count: 2, wR: .06, wT: .20}, {tilt: .55, count: 2, wR: .05, wT: .18}, {
+      tilt: 1.10, count: 2, wR: .05, wT: .15
+    }];
+    const pushFar = p => {
+      const q = locals[locals.length - 1];
+      if (!q || hypot(p.x - q.x, p.y - q.y) >= SEG) locals.push(p);
     };
-    W.addEventListener('resize', resize);
-    resize();
-
-    // === Tunables ===
-    const GRAV = 1600, REST = 0.55, GFRIC = 0.015, AIR = 0.997, WALL = 0.5;
-    const R = 38, TOTAL = 500, ITERS = 5, SUB = 2, pxPerM = 120, totalLen = 60 * pxPerM, SEG = totalLen / (TOTAL - 1);
-
-    // === Disk ===
-    const ball = {
-        x: world.w * 0.5,
-        y: world.h * 0.25,
-        px: world.w * 0.5 - 120 * (1 / 60),
-        py: world.h * 0.25,
-        angle: 0,
-        grounded: false
-    };
-
-    // === Rope ===
-    const P = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0, px: 0, py: 0}));
-    const woundLocal = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0}));
-    let freeCount = 4;
-
-    const toWorld = (lx, ly, ca, sa, cx, cy) => ({x: cx + (lx * ca - ly * sa), y: cy + (lx * sa + ly * ca)});
-    const clamp = (v, a, b) => max(a, min(b, v));
-
-    // Build interior anchors for the wound portion
-    function buildWoundPath() {
-        const inner = R - 2, outer = R, locals = [];
-        const layers = [{tilt: -0.35, count: 2, wR: 0.06, wT: 0.20}, {
-            tilt: 0.55, count: 2, wR: 0.05, wT: 0.18
-        }, {tilt: 1.10, count: 2, wR: 0.05, wT: 0.15}];
-        const pushFar = p => {
-            const q = locals[locals.length - 1];
-            if (!q || hypot(p.x - q.x, p.y - q.y) >= SEG) locals.push(p);
-        };
-        pushFar({x: inner, y: inner});
-        for (const L of layers) {
-            for (let k = 0; k < L.count; k++) {
-                const phase = (k + 0.5) / L.count * PI * 0.7, ct = cos(L.tilt + phase), st = sin(L.tilt + phase);
-                for (let a = -PI * 0.98; a <= PI * 0.98; a += PI) {
-                    const ca = cos(a), sa = sin(a);
-                    let x = inner * (ca * ct - sa * st), y = inner * (ca * st + sa * ct);
-                    const t = (a + PI) / (2 * PI), inward = 0.25 + 0.75 * sin(t * PI),
-                        r = inner - (inner - outer) * (L.wR * inward); // slight inward bias
-                    const len = hypot(x, y) || 1;
-                    x *= r / len;
-                    y *= r / len;
-                    const jitter = (sin((a + phase) * 23.71) * 0.5 + 0.5) * L.wT, ang = atan2(y, x) + jitter * 0.15,
-                        rr = hypot(x, y);
-                    pushFar({x: rr * cos(ang), y: rr * sin(ang)});
-                }
-            }
+    // Seed (no exit-angle dependency)
+    pushFar({x: inner, y: inner});
+    for (const L of layers) {
+      for (let k = 0; k < L.count; k++) {
+        const phase = (k + .5) / L.count * PI * .7, ct = cos(L.tilt + phase), st = sin(L.tilt + phase);
+        for (let a = -PI * .98; a <= PI * .98; a += PI) {
+          const ca = cos(a), sa = sin(a);
+          let x = inner * (ca * ct - sa * st), y = inner * (ca * st + sa * ct);
+          const t = (a + PI) / (2 * PI), inward = .25 + .75 * sin(t * PI), r = inner + 2 * L.wR * inward; // simplified from inner-(inner-outer)*(...)
+          const len = hypot(x, y) || 1;
+          x *= r / len;
+          y *= r / len;
+          const jitter = (sin((a + phase) * 23.71) * .5 + .5) * L.wT, ang = atan2(y, x) + jitter * .15;
+          pushFar({x: r * cos(ang), y: r * sin(ang)}); // rr == r after normalization
         }
-        while (locals.length < TOTAL) {
-            const a = random() * PI * 2, rr = outer + (inner - outer) * random();
-            pushFar({x: rr * cos(a), y: rr * sin(a)});
-        }
-        for (let i = 0; i < TOTAL; i++) {
-            const p = locals[i] || locals[locals.length - 1];
-            woundLocal[i].x = p.x;
-            woundLocal[i].y = p.y;
-        }
+      }
+    }
+    while (locals.length < TOTAL) {
+      const a = random() * PI * 2, rr = outer + (inner - outer) * random();
+      pushFar({x: rr * cos(a), y: rr * sin(a)});
+    }
+    for (let i = 0; i < TOTAL; i++) {
+      const p = locals[i] || locals[locals.length - 1];
+      woundLocal[i].x = p.x;
+      woundLocal[i].y = p.y;
+    }
+  }
+
+  function glueWound() {
+    const ca = cos(ball.angle), sa = sin(ball.angle), cx = ball.x, cy = ball.y;
+    for (let i = freeCount; i < TOTAL; i++) {
+      const L = woundLocal[i], w = toWorld(L.x, L.y, ca, sa, cx, cy);
+      P[i].px = P[i].x = w.x;
+      P[i].py = P[i].y = w.y;
+    }
+  }
+
+  function initRope() {
+    buildWoundPath();
+    glueWound();
+    // short dangling tail (kept same simplistic diag seed)
+    const head = P[freeCount], p1x = head.x + SEG, p1y = head.y + SEG + 2, p0x = p1x + SEG, p0y = p1y + SEG + 2;
+    Object.assign(P[freeCount - 1], {x: p1x, y: p1y, px: p1x, py: p1y});
+    Object.assign(P[0], {x: p0x, y: p0y, px: p0x, py: p0y});
+  }
+
+  initRope();
+
+  // === Input ===
+  const mouse = {x: 0, y: 0, down: false};
+  let lastMouse = {x: 0, y: 0, t: performance.now()}, hitCD = 0;
+  const setMouse = e => {
+    const r = C.getBoundingClientRect();
+    mouse.x = e.clientX - r.left;
+    mouse.y = e.clientY - r.top;
+  };
+  C.addEventListener('pointermove', setMouse);
+  C.addEventListener('pointerdown', e => {
+    mouse.down = true;
+    setMouse(e);
+  });
+  C.addEventListener('pointerup', () => mouse.down = false);
+
+  // === Physics ===
+  function integrateDisk(dt) {
+    const vx = ball.x - ball.px, vy = ball.y - ball.py;
+    ball.px = ball.x;
+    ball.py = ball.y;
+    ball.x += vx * AIR;
+    ball.y += vy * AIR + GRAV * dt * dt;
+
+    const {w, h} = world;
+    ball.grounded = false;
+
+    if (ball.y + R > h) {
+      ball.y = h - R;
+      const vpy = ball.py - ball.y;
+      ball.py = ball.y + vpy * -REST;
+      ball.grounded = true;
+    } else if (ball.y - R < 0) {
+      ball.y = R;
+      const vpy = ball.py - ball.y;
+      ball.py = ball.y + vpy * -WALL;
     }
 
-    function initRope() {
-        buildWoundPath();
-        glueWound();
-        // short dangling tail along tangent
-        const head = P[freeCount];
-        const p1x = head.x + SEG, p1y = head.y + SEG + 2, p0x = p1x + SEG, p0y = p1y + SEG + 2;
-        Object.assign(P[freeCount - 1], {x: p1x, y: p1y, px: p1x, py: p1y});
-        Object.assign(P[0], {x: p0x, y: p0y, px: p0x, py: p0y});
+    if (ball.x - R < 0) {
+      ball.x = R;
+      const vpx = ball.px - ball.x;
+      ball.px = ball.x + vpx * -WALL;
+    } else if (ball.x + R > w) {
+      ball.x = w - R;
+      const vpx = ball.px - ball.x;
+      ball.px = ball.x + vpx * -WALL;
     }
 
-    initRope();
-
-    // === Input ===
-    const mouse = {x: 0, y: 0, down: false};
-    let lastMouse = {x: 0, y: 0, t: performance.now()}, hitCD = 0;
-    const setMouse = e => {
-        const r = C.getBoundingClientRect();
-        mouse.x = e.clientX - r.left;
-        mouse.y = e.clientY - r.top;
-    };
-    C.addEventListener('pointermove', setMouse);
-    C.addEventListener('pointerdown', e => {
-        mouse.down = true;
-        setMouse(e);
-    });
-    C.addEventListener('pointerup', () => mouse.down = false);
-
-    // === Physics ===
-    function integrateDisk(dt) {
-        const vx = ball.x - ball.px, vy = ball.y - ball.py;
-        ball.px = ball.x;
-        ball.py = ball.y;
-        ball.x += vx * AIR;
-        ball.y += vy * AIR + GRAV * dt * dt;
-
-        const {w, h} = world;
-        ball.grounded = false;
-
-        // Floor / Ceiling
-        if (ball.y + R > h) {
-            ball.y = h - R;
-            const vpy = ball.py - ball.y;
-            ball.py = ball.y + vpy * -REST;
-            ball.grounded = true;
-        } else if (ball.y - R < 0) {
-            ball.y = R;
-            const vpy = ball.py - ball.y;
-            ball.py = ball.y + vpy * -WALL;
-        }
-        // Walls
-        if (ball.x - R < 0) {
-            ball.x = R;
-            const vpx = ball.px - ball.x;
-            ball.px = ball.x + vpx * -WALL;
-        } else if (ball.x + R > w) {
-            ball.x = w - R;
-            const vpx = ball.px - ball.x;
-            ball.px = ball.x + vpx * -WALL;
-        }
-
-        if (ball.grounded) {
-            const dx = ball.x - ball.px;
-            ball.angle += dx / R; // roll
-            ball.px = ball.x - (ball.x - ball.px) * (1 - GFRIC); // ground friction
-        }
+    if (ball.grounded) {
+      const dx = ball.x - ball.px;
+      ball.angle += dx / R;
+      ball.px = ball.x - (ball.x - ball.px) * (1 - GFRIC);
     }
+  }
 
-    function glueWound() {
-        const ca = cos(ball.angle), sa = sin(ball.angle), cx = ball.x, cy = ball.y;
-        for (let i = freeCount; i < TOTAL; i++) {
-            const L = woundLocal[i], w = toWorld(L.x, L.y, ca, sa, cx, cy);
-            P[i].px = P[i].x = w.x;
-            P[i].py = P[i].y = w.y;
-        }
+  function integrateTail(dt) {
+    const {w, h} = world, g = GRAV * dt * dt;
+    for (let i = 0; i < freeCount; i++) {
+      const p = P[i], vx = p.x - p.px, vy = p.y - p.py;
+      p.px = p.x;
+      p.py = p.y;
+      p.x += vx;
+      p.y += vy + g;
+      if (p.y > h) {
+        p.y = h;
+        p.py = p.y + (p.y - p.py) * -REST;
+      } else if (p.y < 0) {
+        p.y = 0;
+        p.py = p.y + (p.y - p.py) * -WALL;
+      }
+      if (p.x < 0) {
+        p.x = 0;
+        p.px = p.x + (p.x - p.px) * -WALL;
+      } else if (p.x > w) {
+        p.x = w;
+        p.px = p.x + (p.x - p.px) * -WALL;
+      }
     }
+  }
 
-    function integrateTail(dt) {
-        const {w, h} = world;
-        for (let i = 0; i < freeCount; i++) {
-            const p = P[i], vx = p.x - p.px, vy = p.y - p.py;
-            p.px = p.x;
-            p.py = p.y;
-            p.x += vx;
-            p.y += vy + GRAV * dt * dt;
-            if (p.y > h) {
-                p.y = h;
-                p.py = p.y + (p.y - p.py) * -REST;
-            } else if (p.y < 0) {
-                p.y = 0;
-                p.py = p.y + (p.y - p.py) * -WALL;
-            }
-            if (p.x < 0) {
-                p.x = 0;
-                p.px = p.x + (p.x - p.px) * -WALL;
-            } else if (p.x > w) {
-                p.x = w;
-                p.px = p.x + (p.x - p.px) * -WALL;
-            }
+  function satisfy() {
+    for (let k = 0; k < ITERS; k++) {
+      for (let i = 1; i < TOTAL; i++) {
+        const a = P[i - 1], b = P[i];
+        let dx = b.x - a.x, dy = b.y - a.y, d = hypot(dx, dy) || 1e-6, diff = (d - SEG) / d;
+        let ma = .5, mb = .5;
+        if (i >= freeCount && i - 1 >= freeCount) {
+          ma = mb = 0;
+        } else if (i >= freeCount) {
+          ma = 1;
+          mb = 0;
+        } else if (i - 1 >= freeCount) {
+          ma = 0;
+          mb = 1;
         }
+        a.x += dx * diff * ma;
+        a.y += dy * diff * ma;
+        b.x -= dx * diff * mb;
+        b.y -= dy * diff * mb;
+        if (i - 1 < freeCount && a.y > world.h) a.y = world.h;
+        if (i < freeCount && b.y > world.h) b.y = world.h;
+      }
     }
+  }
 
-    function satisfy() {
-        for (let k = 0; k < ITERS; k++) {
-            for (let i = 1; i < TOTAL; i++) {
-                const a = P[i - 1], b = P[i];
-                let dx = b.x - a.x, dy = b.y - a.y, d = hypot(dx, dy) || 1e-6, diff = (d - SEG) / d;
-                let ma = .5, mb = .5;
-                if (i >= freeCount && i - 1 >= freeCount) {
-                    ma = mb = 0;
-                } else if (i >= freeCount) {
-                    ma = 1;
-                    mb = 0;
-                } else if (i - 1 >= freeCount) {
-                    ma = 0;
-                    mb = 1;
-                }
-                a.x += dx * diff * ma;
-                a.y += dy * diff * ma;
-                b.x -= dx * diff * mb;
-                b.y -= dy * diff * mb;
-                if (i - 1 < freeCount && a.y > world.h) a.y = world.h;
-                if (i < freeCount && b.y > world.h) b.y = world.h;
-            }
-        }
+  const maybeFree = (n = 1) => {
+    for (let k = 0; k < n; k++) {
+      if (freeCount >= TOTAL - 1) return;
+      freeCount++;
     }
+  };
 
-    const maybeFree = (n = 1) => {
-        for (let k = 0; k < n; k++) {
-            if (freeCount >= TOTAL - 1) return;
-            freeCount++;
-        }
-    };
-
-    function releaseOnTension() {
-        if (freeCount <= 0) return;
-        const a = P[freeCount - 1], b = P[freeCount], d = hypot(b.x - a.x, b.y - a.y);
-        if (d > SEG * 1.35) {
-            const extra = min(4, ((d / SEG - 1.35) * 3 | 0) + 1);
-            maybeFree(extra);
-            glueWound();
-        }
+  function releaseOnTension() {
+    if (freeCount <= 0) return;
+    const a = P[freeCount - 1], b = P[freeCount], d = hypot(b.x - a.x, b.y - a.y);
+    if (d > SEG * 1.35) {
+      const extra = min(4, ((d / SEG - 1.35) * 3 | 0) + 1);
+      maybeFree(extra);
+      glueWound();
     }
+  }
 
-    function mouseImpulse(dt, now) {
-        hitCD = max(0, hitCD - dt);
-        const mdx = mouse.x - lastMouse.x, mdy = mouse.y - lastMouse.y, mdt = max(1e-3, (now - lastMouse.t) / 1000),
-            mvx = mdx / mdt, mvy = mdy / mdt;
-        lastMouse = {x: mouse.x, y: mouse.y, t: now};
-        if (!mouse.down || hitCD > 0) return;
-        const dx = mouse.x - ball.x, dy = mouse.y - ball.y, dist = hypot(dx, dy);
-        if (dist > R + 3) return;
+  function mouseImpulse(now) {
+    hitCD = max(0, hitCD - (now - lastMouse.t) / 1000); // use elapsed directly
+    const mdx = mouse.x - lastMouse.x, mdy = mouse.y - lastMouse.y, mdt = max(1e-3, (now - lastMouse.t) / 1000),
+      mvx = mdx / mdt, mvy = mdy / mdt;
+    lastMouse = {x: mouse.x, y: mouse.y, t: now};
+    if (!mouse.down || hitCD > 0) return;
+    const dx = mouse.x - ball.x, dy = mouse.y - ball.y, dist = hypot(dx, dy);
+    if (dist > R + 3) return;
 
-        const nx = dx / (dist || 1), ny = dy / (dist || 1), approach = -(nx * mvx + ny * mvy),
-            base = 520 + clamp(approach * 0.7, -250, 900);
-        const Jx = -nx * base, Jy = -ny * base - 150, vx = (ball.x - ball.px) + Jx * (1 / 60),
-            vy = (ball.y - ball.py) + Jy * (1 / 60);
-        ball.px = ball.x - vx;
-        ball.py = ball.y - vy;
+    const nx = dx / (dist || 1), ny = dy / (dist || 1), approach = -(nx * mvx + ny * mvy),
+      base = 520 + clamp(approach * .7, -250, 900);
+    const Jx = -nx * base, Jy = -ny * base - 150, vx = (ball.x - ball.px) + Jx * (1 / 60),
+      vy = (ball.y - ball.py) + Jy * (1 / 60);
+    ball.px = ball.x - vx;
+    ball.py = ball.y - vy;
 
-        maybeFree(clamp((hypot(Jx, Jy) / 25) | 0, 1, 8));
-        hitCD = 0.10;
-    }
+    maybeFree(clamp((hypot(Jx, Jy) / 25) | 0, 1, 8));
+    hitCD = .10;
+  }
 
-    // === Render ===
-    function drawYarn() {
-        const n = P.length, mid = (a, b) => ({x: (a.x + b.x) * .5, y: (a.y + b.y) * .5});
-        const PAL = [{a: .42, w: 3, col: '#f9a9c8'}, {a: .32, w: 3, col: '#8a2b4f'}, {a: .22, w: 3, col: '#6b1f3d'}];
-        X.lineCap = 'round';
-        X.lineJoin = 'round';
-        for (const L of PAL) {
-            X.strokeStyle = L.col;
-            X.globalAlpha = L.a;
-            X.lineWidth = L.w;
-            let m01 = mid(P[0], P[1]);
-            X.beginPath();
-            X.moveTo(P[0].x, P[0].y);
-            X.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
-            X.stroke();
-            for (let i = 1; i <= n - 2; i++) {
-                const mPrev = mid(P[i - 1], P[i]), mNext = mid(P[i], P[i + 1]);
-                X.beginPath();
-                X.moveTo(mPrev.x, mPrev.y);
-                X.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
-                X.stroke();
-            }
-        }
-        X.globalAlpha = 1;
-    }
-
-    // === Main loop ===
-    let last = performance.now();
-
-    function step(now) {
-        const raw = (now - last) / 1000, dt = clamp(raw, 0, 0.033);
-        last = now;
-        const steps = max(1, SUB), h = dt / steps;
-        for (let s = 0; s < steps; s++) {
-            integrateDisk(h);
-            glueWound();
-            integrateTail(h);
-            satisfy();
-            releaseOnTension();
-            mouseImpulse(h, now);
-        }
-        X.clearRect(0, 0, world.w, world.h);
-        X.fillStyle = '#36a';
-        X.fillRect(0, 0, world.w, world.h);
-        X.strokeStyle = 'rgba(255,255,255,.08)';
-        X.lineWidth = 2;
+  // === Render ===
+  function drawYarn() {
+    const n = P.length, mid = (a, b) => ({x: (a.x + b.x) * .5, y: (a.y + b.y) * .5});
+    const PAL = [{a: .42, w: 3, col: '#f9a9c8'}, {a: .32, w: 3, col: '#8a2b4f'}, {a: .22, w: 3, col: '#6b1f3d'}];
+    X.lineCap = 'round';
+    X.lineJoin = 'round';
+    for (const L of PAL) {
+      X.strokeStyle = L.col;
+      X.globalAlpha = L.a;
+      X.lineWidth = L.w;
+      X.beginPath();
+      let m01 = mid(P[0], P[1]);
+      X.moveTo(P[0].x, P[0].y);
+      X.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
+      X.stroke();
+      for (let i = 1; i <= n - 2; i++) {
+        const mPrev = mid(P[i - 1], P[i]), mNext = mid(P[i], P[i + 1]);
         X.beginPath();
-        X.moveTo(0, world.h - 1);
-        X.lineTo(world.w, world.h - 1);
+        X.moveTo(mPrev.x, mPrev.y);
+        X.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
         X.stroke();
-        drawYarn();
-        X.fillStyle = 'rgba(255,255,255,.9)';
-        X.font = '14px system-ui,sans-serif';
-        X.fillText('yarn: ' + ((SEG * (freeCount - 1) / pxPerM).toFixed(1)) + ' m', 12, 22);
-        requestAnimationFrame(step);
+      }
     }
+    X.globalAlpha = 1;
+  }
 
+  // === Main loop ===
+  let last = performance.now();
+
+  function step(now) {
+    const raw = (now - last) / 1000, dt = clamp(raw, 0, 0.033);
+    last = now;
+    const steps = max(1, SUB), h = dt / steps;
+    for (let s = 0; s < steps; s++) {
+      integrateDisk(h);
+      glueWound();
+      integrateTail(h);
+      satisfy();
+      releaseOnTension();
+      mouseImpulse(now);
+    }
+    X.fillStyle = '#222';
+    X.fillRect(0, 0, world.w, world.h); // clear + bg in one
+    X.strokeStyle = 'rgba(255,255,255,.08)';
+    X.lineWidth = 2;
+    X.beginPath();
+    X.moveTo(0, world.h - 1);
+    X.lineTo(world.w, world.h - 1);
+    X.stroke();
+    drawYarn();
+    X.fillStyle = 'rgba(255,255,255,.9)';
+    X.font = '14px system-ui,sans-serif';
+    X.fillText('yarn: ' + ((SEG * (freeCount - 1) / pxPerM).toFixed(1)) + ' m', 12, 22);
     requestAnimationFrame(step);
+  }
+
+  requestAnimationFrame(step);
 });
