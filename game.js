@@ -433,19 +433,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // === Rendering ===
-    function drawRope() {
-        // Render the entire chain as a smoothed polyline
+    function drawTail() {
+        // Render only the free tail portion [0 .. freeCount]
+        if (freeCount < 1) return;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
-        ctx.strokeStyle = 'rgba(230,160,190,0.9)';
+        ctx.strokeStyle = 'rgba(235,170,195,0.95)';
         ctx.lineWidth = 2;
 
-        // We draw segments between successive midpoints for smoothness
         const P = points;
-        const n = TOTAL_POINTS;
+        const n = Math.max(2, freeCount + 1);
         const mid = (a, b) => ({x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5});
-
-        if (n < 2) return;
 
         // Start cap
         let m01 = mid(P[0], P[1]);
@@ -454,7 +452,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
         ctx.stroke();
 
-        // Middles
+        // Middles up to the head (inclusive)
         for (let i = 1; i <= n - 2; i++) {
             const mPrev = mid(P[i - 1], P[i]);
             const mNext = mid(P[i], P[i + 1]);
@@ -463,13 +461,111 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
             ctx.stroke();
         }
+    }
 
-        // End cap
-        const mnm1 = mid(P[n - 2], P[n - 1]);
+    // Emulate the ball look by drawing only wound strands with layered strokes, no circle fills.
+    function drawWoundFromRope() {
+        if (freeCount >= TOTAL_POINTS - 1) return; // nothing wound
+
+        // Soft ground shadow (allowed: it's not the ball itself)
+        const r = radius;
+        const groundY = world.h;
+        const distToGround = Math.max(0, groundY - (ball.y + r));
+        const t = 1 - Math.max(0, Math.min(1, distToGround / (r * 1.2)));
+        ctx.save();
+        ctx.globalAlpha = 0.18 + 0.22 * t;
+        ctx.fillStyle = '#000';
         ctx.beginPath();
-        ctx.moveTo(mnm1.x, mnm1.y);
-        ctx.quadraticCurveTo(P[n - 1].x, P[n - 1].y, P[n - 1].x, P[n - 1].y);
-        ctx.stroke();
+        ctx.ellipse(ball.x, Math.min(groundY - 1, world.h + r * 0.2), r * (0.9 - 0.2 * t), r * (0.25 + 0.2 * t), 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        // Layered strand rendering: light -> mid -> dark
+        const layers = [{a: 0.42, w: 1.6, col: '#f9a9c8'}, {a: 0.32, w: 1.2, col: '#8a2b4f'}, {
+            a: 0.22,
+            w: 1.0,
+            col: '#6b1f3d'
+        }];
+
+        // Precompute lighting
+        const Lx = ball.x - r * 0.45, Ly = ball.y - r * 0.5; // light position (up-left)
+
+        // We walk pairs of wound points and draw short segments with tone depending on facing
+        for (const L of layers) {
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.strokeStyle = L.col;
+            ctx.lineWidth = L.w;
+
+            for (let i = freeCount; i < TOTAL_POINTS - 1; i++) {
+                const a = points[i], b = points[i + 1];
+                // skip tiny links to keep density even
+                const dx = b.x - a.x, dy = b.y - a.y;
+                const d = Math.hypot(dx, dy);
+                if (d < 0.5) continue;
+
+                // Strand midpoint shading based on a faux normal (midpoint relative to center)
+                const mx = (a.x + b.x) * 0.5, my = (a.y + b.y) * 0.5;
+                const cx = mx - ball.x, cy = my - ball.y;
+                const rlen = Math.hypot(cx, cy) || 1;
+                const nx = cx / rlen, ny = cy / rlen; // radial normal-ish
+                const lx = Lx - mx, ly = Ly - my;
+                const llen = Math.hypot(lx, ly) || 1;
+                const lnx = lx / llen, lny = ly / llen;
+                // lambert term in [0..1]
+                const lambert = Math.max(0, nx * lnx + ny * lny);
+                const facing = 0.35 + 0.65 * lambert; // brighten when facing light
+
+                // Edge darkening (fabric fresnel): darken near rim
+                const rimT = clamp((rlen - r * 0.6) / (r * 0.4), 0, 1);
+                const fres = 1 - 0.25 * rimT;
+
+                ctx.globalAlpha = L.a * facing * fres;
+
+                // Slight width modulation by foreshortening
+                const viewDot = Math.abs(-ny * (mx - ball.x) + nx * (my - ball.y)) / (r + 1e-6);
+                ctx.lineWidth = L.w * (0.9 + 0.3 * viewDot);
+
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+            }
+        }
+
+        // Sparse bright "spec" stitches—short highlights along lit rim directions
+        ctx.strokeStyle = '#ffdbe9';
+        ctx.lineWidth = 1.2;
+        ctx.globalAlpha = 0.18;
+        for (let k = 0; k < 120; k++) {
+            const i = freeCount + ((k * 97) % Math.max(1, (TOTAL_POINTS - 1 - freeCount)));
+            const a = points[i];
+            const dx = a.x - ball.x, dy = a.y - ball.y;
+            const rl = Math.hypot(dx, dy) || 1;
+            if (rl < r * 0.4 || rl > r * 1.02) continue; // near mid-band/rim only
+            const tnx = -dy / rl, tny = dx / rl;
+            const len = 4 + 4 * Math.random();
+            ctx.beginPath();
+            ctx.moveTo(a.x - tnx * len * 0.5, a.y - tny * len * 0.5);
+            ctx.lineTo(a.x + tnx * len * 0.5, a.y + tny * len * 0.5);
+            ctx.stroke();
+        }
+
+        // Subtle interior ambient occlusion via overdrawing darker strands in the lower hemisphere band
+        ctx.strokeStyle = '#401427';
+        ctx.globalAlpha = 0.10;
+        ctx.lineWidth = 1.0;
+        for (let i = freeCount; i < TOTAL_POINTS - 1; i += 2) {
+            const a = points[i], b = points[i + 1];
+            const my = (a.y + b.y) * 0.5;
+            if (my < ball.y) continue; // only bottom half
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+        }
+
+        ctx.globalAlpha = 1;
     }
 
     function formatMeters(px) {
@@ -518,8 +614,10 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.lineTo(world.w, world.h - 1);
         ctx.stroke();
 
-        // rope then ball
-        drawRope();
+        // wound ball look (only rope-based strokes)
+        drawWoundFromRope();
+        // free tail on top
+        drawTail();
 
         // UI: free length
         const freeLen = SEG_LEN * (freeCount - 1);
