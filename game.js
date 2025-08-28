@@ -1,510 +1,308 @@
 document.addEventListener('DOMContentLoaded', () => {
     // === Canvas bootstrap ===
-    const content = document.getElementById('content') || document.body;
-    const c = document.createElement('canvas');
-    const ctx = c.getContext('2d');
-    content.innerHTML = '';
-    document.body.style.margin = '0';
-    document.body.style.overflow = 'hidden';
-    c.style.display = 'block';
-    content.appendChild(c);
+    const $ = document, W = window, B = $.body, C = $.createElement('canvas'), X = C.getContext('2d');
+    (document.getElementById('content') || B).innerHTML = '';
+    Object.assign(B.style, {margin: '0', overflow: 'hidden'});
+    Object.assign(C.style, {display: 'block', touchAction: 'none'});
+    B.appendChild(C);
 
-    // DPR + resize
-    const DPR = Math.min(2, (window.devicePixelRatio || 1));
+    // === Shorthand math ===
+    const {max, min, cos, sin, PI, hypot, random, atan2} = Math;
 
-    function resize() {
-        const w = window.innerWidth || document.documentElement.clientWidth;
-        const h = window.innerHeight || document.documentElement.clientHeight;
-        c.style.width = w + 'px';
-        c.style.height = h + 'px';
-        c.width = (w * DPR) | 0;
-        c.height = (h * DPR) | 0;
-        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    }
-
-    window.addEventListener('resize', resize);
+    // === World / DPI ===
+    const DPR = min(2, W.devicePixelRatio || 1), world = {w: 0, h: 0};
+    const setTF = () => X.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const resize = () => {
+        const w = W.innerWidth || $.documentElement.clientWidth;
+        const h = W.innerHeight || $.documentElement.clientHeight;
+        Object.assign(C.style, {width: w + 'px', height: h + 'px'});
+        C.width = (w * DPR) | 0;
+        C.height = (h * DPR) | 0;
+        setTF();
+        world.w = C.clientWidth;
+        world.h = C.clientHeight;
+    };
+    W.addEventListener('resize', resize);
     resize();
 
-    // === World params ===
-    const grav = 1600;       // px/s^2
-    const rest = 0.55;       // restitution for disk collisions
-    const fricGround = 0.015; // simple rolling friction (per frame when grounded)
-    const fricAir = 0.997;   // gentle air drag for disk
-    const wallRest = 0.5;
+    // === Tunables ===
+    const GRAV = 1600, REST = 0.55, GFRIC = 0.015, AIR = 0.997, WALL = 0.5;
+    const R = 38, TOTAL = 500, ITERS = 5, SUB = 2, pxPerM = 120, totalLen = 60 * pxPerM, SEG = totalLen / (TOTAL - 1);
 
-    // === Yarn geometry ===
-    const radius = 38;              // disk radius (px)
-    const totalLength = 60 * 120;   // 60 m at 120 px/m -> px
-    const TOTAL_POINTS = 500;       // total rope particles (including wound)
-    const ROPE_ITERS = 5;           // distance-constraint iterations
-    const SUBSTEPS = 2;             // verlet substeps for stability
-
-    // Derived counts
-    const SEG_LEN = (totalLength / (TOTAL_POINTS - 1)); // rest length between particles
-
-    // ==== Disk (rigid) state (integrated with Verlet) ====
-    const world = {w: 0, h: 0};
-
-    function syncWorld() {
-        world.w = c.clientWidth;
-        world.h = c.clientHeight;
-    }
-
-    syncWorld();
-
+    // === Disk ===
     const ball = {
-        x: world.w * 0.5, y: world.h * 0.25, px: world.w * 0.5 - 120 * (1 / 60), // initial x-velocity ~120 px/s
-        py: world.h * 0.25, angle: 0, pang: 0, // previous angle (for computing spin if needed)
-        grounded: false,
+        x: world.w * 0.5,
+        y: world.h * 0.25,
+        px: world.w * 0.5 - 120 * (1 / 60),
+        py: world.h * 0.25,
+        angle: 0,
+        grounded: false
     };
 
-    // ==== Rope data (single particle chain) ====
-    // points[0] is the free tail end; points[freeCount] is the head touching the disk; points[TOTAL_POINTS-1] deepest in the ball
-    const points = new Array(TOTAL_POINTS).fill(0).map(() => ({x: 0, y: 0, px: 0, py: 0}));
-    // Local (disk space) anchors for the wound portion (i >= freeCount). These coordinates are rigidly attached to the disk.
-    const woundLocal = new Array(TOTAL_POINTS).fill(0).map(() => ({x: 0, y: 0}));
-    // Index of the *first* wound particle in the chain (the one on the surface exit). All indices < freeCount are free.
-    let freeCount = 4;  // start with a short dangling tail
-    let exitAngle = Math.random() * Math.PI * 2; // where the rope leaves the disk
+    // === Rope ===
+    const P = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0, px: 0, py: 0}));
+    const woundLocal = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0}));
+    let freeCount = 4;
 
-    // ===== Utility =====
-    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const toWorld = (lx, ly, ca, sa, cx, cy) => ({x: cx + (lx * ca - ly * sa), y: cy + (lx * sa + ly * ca)});
+    const clamp = (v, a, b) => max(a, min(b, v));
 
-    // Build a tangled path inside the disk and sample it at ~SEG_LEN spacing to get local anchors.
-    // The first sampled point is on the outer rim at exitAngle; subsequent points wander through the interior.
+    // Build interior anchors for the wound portion
     function buildWoundPath() {
-        // New approach: layered great-circle bands with jitter, ensuring near-uniform
-        // spacing and a filled silhouette that matches the old shaded ball look.
-        const maxR = radius - 2;
-        const minR = radius;
-
-        const layers = [
-            {tilt: -0.35, count: 2, wobR: 0.06, wobT: 0.20},
-            {tilt: 0.55, count: 2, wobR: 0.05, wobT: 0.18},
-            {tilt: 1.10, count: 2, wobR: 0.05, wobT: 0.15},
-        ];
-
-        const locals = [];
-
-        function pushIfFar(p) {
-            const last = locals[locals.length - 1];
-            if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= SEG_LEN) locals.push(p);
-        }
-
-        // Seed on rim at exitAngle for a clean tail join
-        pushIfFar({x: maxR * Math.cos(exitAngle), y: maxR * Math.sin(exitAngle)});
-
-        // Interleave tilted bands
+        const inner = R - 2, outer = R, locals = [];
+        const layers = [{tilt: -0.35, count: 2, wR: 0.06, wT: 0.20}, {
+            tilt: 0.55, count: 2, wR: 0.05, wT: 0.18
+        }, {tilt: 1.10, count: 2, wR: 0.05, wT: 0.15}];
+        const pushFar = p => {
+            const q = locals[locals.length - 1];
+            if (!q || hypot(p.x - q.x, p.y - q.y) >= SEG) locals.push(p);
+        };
+        pushFar({x: inner, y: inner});
         for (const L of layers) {
             for (let k = 0; k < L.count; k++) {
-                const phase = (k + 0.5) / L.count * Math.PI * 0.7;
-                for (let a = -Math.PI * 0.98; a <= Math.PI * 0.98; a += Math.PI) {
-                    const ca = Math.cos(a), sa = Math.sin(a);
-                    const ct = Math.cos(L.tilt + phase), st = Math.sin(L.tilt + phase);
-                    let x = maxR * (ca * ct - sa * st);
-                    let y = maxR * (ca * st + sa * ct);
-                    // inward bias so we don't leave a donut hole
-                    const t = (a + Math.PI) / (2 * Math.PI);
-                    const inward = 0.25 + 0.75 * Math.sin(t * Math.PI);
-                    const r = maxR - (maxR - minR) * (L.wobR * inward);
-                    const len = Math.hypot(x, y) || 1;
+                const phase = (k + 0.5) / L.count * PI * 0.7, ct = cos(L.tilt + phase), st = sin(L.tilt + phase);
+                for (let a = -PI * 0.98; a <= PI * 0.98; a += PI) {
+                    const ca = cos(a), sa = sin(a);
+                    let x = inner * (ca * ct - sa * st), y = inner * (ca * st + sa * ct);
+                    const t = (a + PI) / (2 * PI), inward = 0.25 + 0.75 * sin(t * PI),
+                        r = inner - (inner - outer) * (L.wR * inward); // slight inward bias
+                    const len = hypot(x, y) || 1;
                     x *= r / len;
                     y *= r / len;
-                    // small jitter to break perfect bands
-                    const jitter = (Math.sin((a + phase) * 23.71) * 0.5 + 0.5) * L.wobT;
-                    const ang = Math.atan2(y, x) + jitter * 0.15;
-                    const rr = Math.hypot(x, y);
-                    x = rr * Math.cos(ang);
-                    y = rr * Math.sin(ang);
-                    pushIfFar({x, y});
+                    const jitter = (sin((a + phase) * 23.71) * 0.5 + 0.5) * L.wT, ang = atan2(y, x) + jitter * 0.15,
+                        rr = hypot(x, y);
+                    pushFar({x: rr * cos(ang), y: rr * sin(ang)});
                 }
             }
         }
-
-        // Ensure we have enough points; sprinkle interiors if needed
-        while (locals.length < TOTAL_POINTS) {
-            const ang = Math.random() * Math.PI * 2;
-            const rr = minR + (maxR - minR) * Math.random();
-            pushIfFar({x: rr * Math.cos(ang), y: rr * Math.sin(ang)});
+        while (locals.length < TOTAL) {
+            const a = random() * PI * 2, rr = outer + (inner - outer) * random();
+            pushFar({x: rr * cos(a), y: rr * sin(a)});
         }
-
-        for (let i = 0; i < TOTAL_POINTS; i++) {
+        for (let i = 0; i < TOTAL; i++) {
             const p = locals[i] || locals[locals.length - 1];
             woundLocal[i].x = p.x;
             woundLocal[i].y = p.y;
         }
     }
 
-    // Initialize chain points and wound path
     function initRope() {
         buildWoundPath();
-
-        // Place the disk and all wound points in world space
-        const cx = ball.x, cy = ball.y;
-
-        // Set up entire chain positions. Start with a short downward dangling tail from the exit point.
-        // points[freeCount] must sit exactly on the exit point on the surface.
-        function worldFromLocal(ix) {
-            const lx = woundLocal[ix].x, ly = woundLocal[ix].y;
-            const cosA = Math.cos(ball.angle), sinA = Math.sin(ball.angle);
-            return {
-                x: cx + (lx * cosA - ly * sinA), y: cy + (lx * sinA + ly * cosA)
-            };
-        }
-
-        // Position wound portion
-        for (let i = freeCount; i < TOTAL_POINTS; i++) {
-            const wpos = worldFromLocal(i);
-            points[i].x = points[i].px = wpos.x;
-            points[i].y = points[i].py = wpos.y;
-        }
-
-        // Build a simple tail: points[freeCount-1] sits one segment away along the tangent (leaving clockwise)
-        const ex = Math.cos(exitAngle), ey = Math.sin(exitAngle);
-        const tx = -ey, ty = ex;
-        const head = points[freeCount];
-
-        // Tail seed
-        const p1x = head.x + tx * SEG_LEN;
-        const p1y = head.y + ty * SEG_LEN + 2; // tiny sag
-        const p0x = p1x + tx * SEG_LEN;
-        const p0y = p1y + ty * SEG_LEN + 2;
-
-        points[freeCount - 1].x = points[freeCount - 1].px = p1x;
-        points[freeCount - 1].y = points[freeCount - 1].py = p1y;
-        points[0].x = points[0].px = p0x;
-        points[0].y = points[0].py = p0y;
+        glueWound();
+        // short dangling tail along tangent
+        const head = P[freeCount];
+        const p1x = head.x + SEG, p1y = head.y + SEG + 2, p0x = p1x + SEG, p0y = p1y + SEG + 2;
+        Object.assign(P[freeCount - 1], {x: p1x, y: p1y, px: p1x, py: p1y});
+        Object.assign(P[0], {x: p0x, y: p0y, px: p0x, py: p0y});
     }
 
     initRope();
 
-    // === Input handling ===
+    // === Input ===
     const mouse = {x: 0, y: 0, down: false};
-    let lastMouse = {x: 0, y: 0, t: performance.now()};
-    let hitCooldown = 0; // seconds between impulses
-
-    function setMouse(e) {
-        const rect = c.getBoundingClientRect();
-        mouse.x = (e.clientX - rect.left);
-        mouse.y = (e.clientY - rect.top);
-    }
-
-    c.addEventListener('mousemove', (e) => setMouse(e));
-    c.addEventListener('mousedown', (e) => {
+    let lastMouse = {x: 0, y: 0, t: performance.now()}, hitCD = 0;
+    const setMouse = e => {
+        const r = C.getBoundingClientRect();
+        mouse.x = e.clientX - r.left;
+        mouse.y = e.clientY - r.top;
+    };
+    C.addEventListener('pointermove', setMouse);
+    C.addEventListener('pointerdown', e => {
         mouse.down = true;
         setMouse(e);
     });
-    c.addEventListener('mouseup', () => {
-        mouse.down = false;
-    });
-    c.addEventListener('touchstart', (e) => {
-        const t = e.touches[0];
-        setMouse(t);
-        mouse.down = true;
-        e.preventDefault();
-    });
-    c.addEventListener('touchmove', (e) => {
-        const t = e.touches[0];
-        setMouse(t);
-        e.preventDefault();
-    });
-    c.addEventListener('touchend', () => {
-        mouse.down = false;
-    });
+    C.addEventListener('pointerup', () => mouse.down = false);
 
-    // === Physics core ===
+    // === Physics ===
     function integrateDisk(dt) {
-        // Verlet integrate disk center
-        const vx = (ball.x - ball.px);
-        const vy = (ball.y - ball.py);
-
+        const vx = ball.x - ball.px, vy = ball.y - ball.py;
         ball.px = ball.x;
         ball.py = ball.y;
-        ball.x += vx * fricAir;
-        ball.y += vy * fricAir + grav * dt * dt; // gravity applied in position units
+        ball.x += vx * AIR;
+        ball.y += vy * AIR + GRAV * dt * dt;
 
-        // Collide with bounds
-        const w = world.w, h = world.h;
-
+        const {w, h} = world;
         ball.grounded = false;
 
-        // Floor
-        if (ball.y + radius > h) {
-            ball.y = h - radius;
-            const vpy = ball.py - ball.y; // previous step vector along y (opposite of velocity)
-            ball.py = ball.y + vpy * -rest; // reflect with restitution
-            ball.grounded = true;
-        }
-        // Ceiling
-        if (ball.y - radius < 0) {
-            ball.y = radius;
+        // Floor / Ceiling
+        if (ball.y + R > h) {
+            ball.y = h - R;
             const vpy = ball.py - ball.y;
-            ball.py = ball.y + vpy * -wallRest;
+            ball.py = ball.y + vpy * -REST;
+            ball.grounded = true;
+        } else if (ball.y - R < 0) {
+            ball.y = R;
+            const vpy = ball.py - ball.y;
+            ball.py = ball.y + vpy * -WALL;
         }
-        // Left
-        if (ball.x - radius < 0) {
-            ball.x = radius;
+        // Walls
+        if (ball.x - R < 0) {
+            ball.x = R;
             const vpx = ball.px - ball.x;
-            ball.px = ball.x + vpx * -wallRest;
-        }
-        // Right
-        if (ball.x + radius > w) {
-            ball.x = w - radius;
+            ball.px = ball.x + vpx * -WALL;
+        } else if (ball.x + R > w) {
+            ball.x = w - R;
             const vpx = ball.px - ball.x;
-            ball.px = ball.x + vpx * -wallRest;
+            ball.px = ball.x + vpx * -WALL;
         }
 
-        // Rolling when grounded: advance angle according to horizontal travel
         if (ball.grounded) {
-            const dx = (ball.x - ball.px);
-            ball.angle += dx / radius; // approximate rolling; sign makes visual sense
-
-            // simple kinetic friction -> damp horizontal motion via previous position
-            const vx2 = ball.x - ball.px;
-            ball.px = ball.x - vx2 * (1 - fricGround);
+            const dx = ball.x - ball.px;
+            ball.angle += dx / R; // roll
+            ball.px = ball.x - (ball.x - ball.px) * (1 - GFRIC); // ground friction
         }
     }
 
-    function setWoundWorldPositions() {
-        // Enforce wound (rigid) positions and keep their previous positions glued too (no velocity)
-        const cosA = Math.cos(ball.angle), sinA = Math.sin(ball.angle);
-        const cx = ball.x, cy = ball.y;
-        for (let i = freeCount; i < TOTAL_POINTS; i++) {
-            const lx = woundLocal[i].x, ly = woundLocal[i].y;
-            const wx = cx + (lx * cosA - ly * sinA);
-            const wy = cy + (lx * sinA + ly * cosA);
-            points[i].px = points[i].x = wx;
-            points[i].py = points[i].y = wy;
+    function glueWound() {
+        const ca = cos(ball.angle), sa = sin(ball.angle), cx = ball.x, cy = ball.y;
+        for (let i = freeCount; i < TOTAL; i++) {
+            const L = woundLocal[i], w = toWorld(L.x, L.y, ca, sa, cx, cy);
+            P[i].px = P[i].x = w.x;
+            P[i].py = P[i].y = w.y;
         }
     }
 
     function integrateTail(dt) {
-        // Verlet integrate free particles only
+        const {w, h} = world;
         for (let i = 0; i < freeCount; i++) {
-            const p = points[i];
-            const vx = (p.x - p.px);
-            const vy = (p.y - p.py);
+            const p = P[i], vx = p.x - p.px, vy = p.y - p.py;
             p.px = p.x;
             p.py = p.y;
             p.x += vx;
-            p.y += vy + grav * dt * dt; // gravity
-
-            // Collide with floor
-            if (p.y > world.h) {
-                p.y = world.h;
-                p.py = p.y + (p.y - p.py) * -rest;
-            }
-            // Ceiling
-            if (p.y < 0) {
+            p.y += vy + GRAV * dt * dt;
+            if (p.y > h) {
+                p.y = h;
+                p.py = p.y + (p.y - p.py) * -REST;
+            } else if (p.y < 0) {
                 p.y = 0;
-                p.py = p.y + (p.y - p.py) * -wallRest;
+                p.py = p.y + (p.y - p.py) * -WALL;
             }
-            // Left/Right
             if (p.x < 0) {
                 p.x = 0;
-                p.px = p.x + (p.x - p.px) * -wallRest;
-            }
-            if (p.x > world.w) {
-                p.x = world.w;
-                p.px = p.x + (p.x - p.px) * -wallRest;
+                p.px = p.x + (p.x - p.px) * -WALL;
+            } else if (p.x > w) {
+                p.x = w;
+                p.px = p.x + (p.x - p.px) * -WALL;
             }
         }
     }
 
-    function satisfyConstraints() {
-        // Distance constraints along the chain; wound nodes are treated as fixed.
-        for (let iter = 0; iter < ROPE_ITERS; iter++) {
-            for (let i = 1; i < TOTAL_POINTS; i++) {
-                const a = points[i - 1];
-                const b = points[i];
-                let dx = b.x - a.x;
-                let dy = b.y - a.y;
-                let d = Math.hypot(dx, dy) || 1e-6;
-                const diff = (d - SEG_LEN) / d;
-
-                // Movement shares: if a or b is wound (i >= freeCount), we only move the free one.
-                let moveA = 0.5, moveB = 0.5;
+    function satisfy() {
+        for (let k = 0; k < ITERS; k++) {
+            for (let i = 1; i < TOTAL; i++) {
+                const a = P[i - 1], b = P[i];
+                let dx = b.x - a.x, dy = b.y - a.y, d = hypot(dx, dy) || 1e-6, diff = (d - SEG) / d;
+                let ma = .5, mb = .5;
                 if (i >= freeCount && i - 1 >= freeCount) {
-                    moveA = 0;
-                    moveB = 0;
+                    ma = mb = 0;
                 } else if (i >= freeCount) {
-                    moveA = 1;
-                    moveB = 0;
+                    ma = 1;
+                    mb = 0;
                 } else if (i - 1 >= freeCount) {
-                    moveA = 0;
-                    moveB = 1;
+                    ma = 0;
+                    mb = 1;
                 }
-
-                // Apply corrections
-                a.x += dx * diff * moveA;
-                a.y += dy * diff * moveA;
-                b.x -= dx * diff * moveB;
-                b.y -= dy * diff * moveB;
-
-                // Keep free particles above floor minimally during solving
-                if (i - 1 < freeCount) {
-                    if (a.y > world.h) a.y = world.h;
-                }
-                if (i < freeCount) {
-                    if (b.y > world.h) b.y = world.h;
-                }
+                a.x += dx * diff * ma;
+                a.y += dy * diff * ma;
+                b.x -= dx * diff * mb;
+                b.y -= dy * diff * mb;
+                if (i - 1 < freeCount && a.y > world.h) a.y = world.h;
+                if (i < freeCount && b.y > world.h) b.y = world.h;
             }
         }
     }
 
-    // Auto-free logic: if the head link is overstretched, pop another particle off the disk
-    function maybeFreeNext(bySegments = 1) {
-        for (let k = 0; k < bySegments; k++) {
-            if (freeCount >= TOTAL_POINTS - 1) return; // nothing left to free (keep one on disk for exit point)
-            // Promote points[freeCount] to free: keep its current world position & previous position (so no pop)
+    const maybeFree = (n = 1) => {
+        for (let k = 0; k < n; k++) {
+            if (freeCount >= TOTAL - 1) return;
             freeCount++;
         }
-    }
+    };
 
-    function tensionRelease() {
-        // Measure stretch at the boundary link [freeCount-1] <-> [freeCount]
+    function releaseOnTension() {
         if (freeCount <= 0) return;
-        const a = points[freeCount - 1];
-        const b = points[freeCount];
-        const d = Math.hypot(b.x - a.x, b.y - a.y);
-        if (d > SEG_LEN * 1.35) {
-            const extra = Math.min(4, Math.floor((d / SEG_LEN - 1.35) * 3) + 1);
-            maybeFreeNext(extra);
-            // After freeing, immediately glue wound positions again to avoid snapping while the boundary moves
-            setWoundWorldPositions();
+        const a = P[freeCount - 1], b = P[freeCount], d = hypot(b.x - a.x, b.y - a.y);
+        if (d > SEG * 1.35) {
+            const extra = min(4, ((d / SEG - 1.35) * 3 | 0) + 1);
+            maybeFree(extra);
+            glueWound();
         }
     }
 
-    function handleMouseImpulses(dt, now) {
-        hitCooldown = Math.max(0, hitCooldown - dt);
-        const mdx = mouse.x - lastMouse.x;
-        const mdy = mouse.y - lastMouse.y;
-        const mdT = Math.max(1e-3, (now - lastMouse.t) / 1000);
-        const mvx = mdx / mdT, mvy = mdy / mdT;
+    function mouseImpulse(dt, now) {
+        hitCD = max(0, hitCD - dt);
+        const mdx = mouse.x - lastMouse.x, mdy = mouse.y - lastMouse.y, mdt = max(1e-3, (now - lastMouse.t) / 1000),
+            mvx = mdx / mdt, mvy = mdy / mdt;
+        lastMouse = {x: mouse.x, y: mouse.y, t: now};
+        if (!mouse.down || hitCD > 0) return;
+        const dx = mouse.x - ball.x, dy = mouse.y - ball.y, dist = hypot(dx, dy);
+        if (dist > R + 3) return;
 
-        lastMouse.x = mouse.x;
-        lastMouse.y = mouse.y;
-        lastMouse.t = now;
-
-        const dx = mouse.x - ball.x;
-        const dy = mouse.y - ball.y;
-        const dist = Math.hypot(dx, dy);
-
-        if (!mouse.down) return;
-        if (hitCooldown > 0) return;
-        if (dist > radius + 3) return;
-
-        // Apply an impulse to the disk by modifying its previous position (Verlet velocity hack)
-        const nx = dx / (dist || 1);
-        const ny = dy / (dist || 1);
-
-        // Approach speed into the center produces larger impulses
-        const approach = -(nx * mvx + ny * mvy);
-        const base = 520 + clamp(approach * 0.7, -250, 900);
-
-        // Velocity after impulse v' = v + J/m. In Verlet: px' = x - v'
-        const Jx = -nx * base;
-        const Jy = -ny * base - 150; // slight upward bias for fun
-
-        const vx = (ball.x - ball.px) + (Jx * (1 / 60));
-        const vy = (ball.y - ball.py) + (Jy * (1 / 60));
+        const nx = dx / (dist || 1), ny = dy / (dist || 1), approach = -(nx * mvx + ny * mvy),
+            base = 520 + clamp(approach * 0.7, -250, 900);
+        const Jx = -nx * base, Jy = -ny * base - 150, vx = (ball.x - ball.px) + Jx * (1 / 60),
+            vy = (ball.y - ball.py) + Jy * (1 / 60);
         ball.px = ball.x - vx;
         ball.py = ball.y - vy;
 
-        // Free some segments depending on impulse size
-        const Jmag = Math.hypot(Jx, Jy);
-        const segs = clamp(Math.floor(Jmag / 25), 1, 8);
-        maybeFreeNext(segs);
-
-        hitCooldown = 0.10;
+        maybeFree(clamp((hypot(Jx, Jy) / 25) | 0, 1, 8));
+        hitCD = 0.10;
     }
 
-    // === Rendering ===
+    // === Render ===
     function drawYarn() {
-        // if (freeCount < 1) return;
-        const P = points;
-        const n = P.length; // Math.max(2, freeCount + 1);
-        const mid = (a, b) => ({x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5});
-        const PAL = [{a: 0.42, w: 3.0, col: '#f9a9c8'}, {a: 0.32, w: 3.0, col: '#8a2b4f'}, {
-            a: 0.22, w: 3.0, col: '#6b1f3d'
-        }];
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
+        const n = P.length, mid = (a, b) => ({x: (a.x + b.x) * .5, y: (a.y + b.y) * .5});
+        const PAL = [{a: .42, w: 3, col: '#f9a9c8'}, {a: .32, w: 3, col: '#8a2b4f'}, {a: .22, w: 3, col: '#6b1f3d'}];
+        X.lineCap = 'round';
+        X.lineJoin = 'round';
         for (const L of PAL) {
-            ctx.strokeStyle = L.col;
-            ctx.globalAlpha = L.a;
-            ctx.lineWidth = L.w;
+            X.strokeStyle = L.col;
+            X.globalAlpha = L.a;
+            X.lineWidth = L.w;
             let m01 = mid(P[0], P[1]);
-            ctx.beginPath();
-            ctx.moveTo(P[0].x, P[0].y);
-            ctx.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
-            ctx.stroke();
+            X.beginPath();
+            X.moveTo(P[0].x, P[0].y);
+            X.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
+            X.stroke();
             for (let i = 1; i <= n - 2; i++) {
-                const mPrev = mid(P[i - 1], P[i]);
-                const mNext = mid(P[i], P[i + 1]);
-                ctx.beginPath();
-                ctx.moveTo(mPrev.x, mPrev.y);
-                ctx.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
-                ctx.stroke();
+                const mPrev = mid(P[i - 1], P[i]), mNext = mid(P[i], P[i + 1]);
+                X.beginPath();
+                X.moveTo(mPrev.x, mPrev.y);
+                X.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
+                X.stroke();
             }
         }
-        ctx.globalAlpha = 1;
-    }
-
-    function formatMeters(px) {
-        return (px / 120).toFixed(1) + ' m';
+        X.globalAlpha = 1;
     }
 
     // === Main loop ===
     let last = performance.now();
 
     function step(now) {
-        syncWorld();
-        const rawDt = (now - last) / 1000;
-        const dt = clamp(rawDt, 0, 0.033);
+        const raw = (now - last) / 1000, dt = clamp(raw, 0, 0.033);
         last = now;
-
-        // Substep for stability
-        const steps = Math.max(1, SUBSTEPS);
-        const h = dt / steps;
-
+        const steps = max(1, SUB), h = dt / steps;
         for (let s = 0; s < steps; s++) {
-            // 1) Disk
             integrateDisk(h);
-            // 2) Glue wound nodes to disk pose
-            setWoundWorldPositions();
-            // 3) Tail integrate
+            glueWound();
             integrateTail(h);
-            // 4) Solve distances (tail vs head link vs wound)
-            satisfyConstraints();
-            // 5) Release on tension
-            tensionRelease();
-            // 6) Mouse impulses
-            handleMouseImpulses(h, now);
+            satisfy();
+            releaseOnTension();
+            mouseImpulse(h, now);
         }
-
-        // === Render ===
-        // bg
-        ctx.clearRect(0, 0, world.w, world.h);
-        ctx.fillStyle = '#36a';
-        ctx.fillRect(0, 0, world.w, world.h);
-
-        // ground line
-        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(0, world.h - 1);
-        ctx.lineTo(world.w, world.h - 1);
-        ctx.stroke();
-
+        X.clearRect(0, 0, world.w, world.h);
+        X.fillStyle = '#36a';
+        X.fillRect(0, 0, world.w, world.h);
+        X.strokeStyle = 'rgba(255,255,255,.08)';
+        X.lineWidth = 2;
+        X.beginPath();
+        X.moveTo(0, world.h - 1);
+        X.lineTo(world.w, world.h - 1);
+        X.stroke();
         drawYarn();
-
-        // UI: free length
-        const freeLen = SEG_LEN * (freeCount - 1);
-        ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.font = '14px system-ui, sans-serif';
-        ctx.fillText('yarn: ' + formatMeters(freeLen), 12, 22);
-
+        X.fillStyle = 'rgba(255,255,255,.9)';
+        X.font = '14px system-ui,sans-serif';
+        X.fillText('yarn: ' + ((SEG * (freeCount - 1) / pxPerM).toFixed(1)) + ' m', 12, 22);
         requestAnimationFrame(step);
     }
 
