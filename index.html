@@ -164,6 +164,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (p.y > h) {
         p.y = h;
         p.py = p.y + (p.y - p.py) * -REST;
+        p.px = p.x - (p.x - p.px) * (1 - GFRIC);
       } else if (p.y < 0) {
         p.y = 0;
         p.py = p.y + (p.y - p.py) * -WALL;
