@@ -48,8 +48,17 @@ document.addEventListener('DOMContentLoaded', () => {
       tilt: 1.10, count: 2, wR: .05, wT: .15
     }];
     const pushFar = p => {
-      const q = locals[locals.length - 1];
-      if (!q || hypot(p.x - q.x, p.y - q.y) >= SEG) locals.push(p);
+      if (locals.length === 0) {
+        locals.push(p);
+        return;
+      }
+      const q = locals[locals.length - 1], d = hypot(p.x - q.x, p.y - q.y);
+      if (!q || d < SEG) {
+        const nx = (p.x - q.x) / d, ny = (p.y - q.y) / d;
+        locals.push({x: q.x + nx * SEG, y: q.y + ny * SEG});
+      } else {
+        locals.push(p);
+      }
     };
     pushFar({x: inner, y: inner});
     for (const L of layers) {
