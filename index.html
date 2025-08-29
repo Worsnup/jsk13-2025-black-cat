@@ -26,11 +26,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // === Tunables ===
   const GRAV = 1600, REST = .55, GFRIC = .015, AIR = .997, WALL = .5;
-  const R = 38, TOTAL = 500, ITERS = 5, SUB = 2, pxPerM = 120, SEG = (60 * pxPerM) / (TOTAL - 1);
+  const R = 38, LEN = 60, TOTAL = 300, ITERS = 5, SUB_STEPS = 2, pxPerM = 120, SEG = (LEN * pxPerM) / (TOTAL - 1);
 
   // === Disk ===
   const ball = {
-    x: world.w * .5, y: world.h * .25, px: world.w * .5 - 120 * (1 / 60), py: world.h * .25, angle: 0, grounded: false
+    x: world.w * .5, y: world.h * .25, px: world.w * .5 - 120 * (1 / 60), py: world.h * .25, angle: 0, grounded: false, live: true
   };
 
   // === Rope ===
@@ -51,7 +51,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const q = locals[locals.length - 1];
       if (!q || hypot(p.x - q.x, p.y - q.y) >= SEG) locals.push(p);
     };
-    // Seed (no exit-angle dependency)
     pushFar({x: inner, y: inner});
     for (const L of layers) {
       for (let k = 0; k < L.count; k++) {
@@ -59,12 +58,12 @@ document.addEventListener('DOMContentLoaded', () => {
         for (let a = -PI * .98; a <= PI * .98; a += PI) {
           const ca = cos(a), sa = sin(a);
           let x = inner * (ca * ct - sa * st), y = inner * (ca * st + sa * ct);
-          const t = (a + PI) / (2 * PI), inward = .25 + .75 * sin(t * PI), r = inner + 2 * L.wR * inward; // simplified from inner-(inner-outer)*(...)
+          const t = (a + PI) / (2 * PI), inward = .25 + .75 * sin(t * PI), r = inner + 2 * L.wR * inward;
           const len = hypot(x, y) || 1;
           x *= r / len;
           y *= r / len;
           const jitter = (sin((a + phase) * 23.71) * .5 + .5) * L.wT, ang = atan2(y, x) + jitter * .15;
-          pushFar({x: r * cos(ang), y: r * sin(ang)}); // rr == r after normalization
+          pushFar({x: r * cos(ang), y: r * sin(ang)});
         }
       }
     }
@@ -100,12 +99,14 @@ document.addEventListener('DOMContentLoaded', () => {
   initRope();
 
   // === Input ===
-  const mouse = {x: 0, y: 0, down: false};
-  let lastMouse = {x: 0, y: 0, t: performance.now()}, hitCD = 0;
+  const mouse = {x: 0, y: 0, down: false, t: performance.now()};
+  let pMouse = {x: 0, y: 0, t: performance.now() - 0.01}, timer = 0;
   const setMouse = e => {
+    pMouse = {x: mouse.x, y: mouse.y, t: mouse.t};
     const r = C.getBoundingClientRect();
     mouse.x = e.clientX - r.left;
     mouse.y = e.clientY - r.top;
+    mouse.t = performance.now();
   };
   C.addEventListener('pointermove', setMouse);
   C.addEventListener('pointerdown', e => {
@@ -116,6 +117,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // === Physics ===
   function integrateDisk(dt) {
+    if (!ball.live) {
+      ball.x = ball.y = ball.px = ball.py = -999;
+      ball.angle = 0;
+      ball.grounded = false;
+      return;
+    }
     const vx = ball.x - ball.px, vy = ball.y - ball.py;
     ball.px = ball.x;
     ball.py = ball.y;
@@ -204,41 +211,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  const maybeFree = (n = 1) => {
-    for (let k = 0; k < n; k++) {
-      if (freeCount >= TOTAL - 1) return;
-      freeCount++;
-    }
-  };
-
-  function releaseOnTension() {
-    if (freeCount <= 0) return;
-    const a = P[freeCount - 1], b = P[freeCount], d = hypot(b.x - a.x, b.y - a.y);
-    if (d > SEG * 1.35) {
-      const extra = min(4, ((d / SEG - 1.35) * 3 | 0) + 1);
-      maybeFree(extra);
-      glueWound();
-    }
+  const freeSegments = (n = 1) => {
+    for (let k = 0; k < (n | 0) && freeCount < TOTAL; k++ & freeCount++) ball.live = freeCount < TOTAL;
   }
 
   function mouseImpulse(now) {
-    hitCD = max(0, hitCD - (now - lastMouse.t) / 1000); // use elapsed directly
-    const mdx = mouse.x - lastMouse.x, mdy = mouse.y - lastMouse.y, mdt = max(1e-3, (now - lastMouse.t) / 1000),
-      mvx = mdx / mdt, mvy = mdy / mdt;
-    lastMouse = {x: mouse.x, y: mouse.y, t: now};
-    if (!mouse.down || hitCD > 0) return;
-    const dx = mouse.x - ball.x, dy = mouse.y - ball.y, dist = hypot(dx, dy);
-    if (dist > R + 3) return;
-
-    const nx = dx / (dist || 1), ny = dy / (dist || 1), approach = -(nx * mvx + ny * mvy),
-      base = 520 + clamp(approach * .7, -250, 900);
-    const Jx = -nx * base, Jy = -ny * base - 150, vx = (ball.x - ball.px) + Jx * (1 / 60),
-      vy = (ball.y - ball.py) + Jy * (1 / 60);
+    timer = max(0, timer - (now - pMouse.t) / 1000);
+    const mdt = 1e-3 * max(1, now - pMouse.t), mvx = (mouse.x - pMouse.x) / mdt, mvy = (mouse.y - pMouse.y) / mdt;
+    let dx = mouse.x - ball.x, dy = mouse.y - ball.y, d = hypot(dx, dy);
+    if (timer > 0 || d > R) return;
+    const base = clamp(-(dx * mvx + dy * mvy), -250, 250) / d, Jx = -dx * base, Jy = -dy * base - 150,
+      vx = (ball.x - ball.px) + Jx * (1 / 60), vy = (ball.y - ball.py) + Jy * (1 / 60);
     ball.px = ball.x - vx;
     ball.py = ball.y - vy;
-
-    maybeFree(clamp((hypot(Jx, Jy) / 25) | 0, 1, 8));
-    hitCD = .10;
+    console.log(base, Jx, Jy, vx, vy);
+    freeSegments(hypot(Jx, Jy) / 150);
+    timer = .1;
   }
 
   // === Render ===
@@ -268,18 +256,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // === Main loop ===
-  let last = performance.now();
-
+  let pStep = performance.now();
   function step(now) {
-    const raw = (now - last) / 1000, dt = clamp(raw, 0, 0.033);
-    last = now;
-    const steps = max(1, SUB), h = dt / steps;
-    for (let s = 0; s < steps; s++) {
+    const dt = clamp((now - pStep) / 1000, 0, 0.033), h = dt / SUB_STEPS;
+    pStep = now;
+    for (let s = 0; s < SUB_STEPS; s++) {
       integrateDisk(h);
       glueWound();
       integrateTail(h);
       satisfy();
-      releaseOnTension();
       mouseImpulse(now);
     }
     X.fillStyle = '#222';
