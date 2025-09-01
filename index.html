@@ -34,9 +34,12 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   // === Rope ===
-  const P = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0, px: 0, py: 0}));
+  const rX = Array(TOTAL).fill(0).map(() => 0);
+  const rY = Array(TOTAL).fill(0).map(() => 0);
+  const vX = Array(TOTAL).fill(0).map(() => 0);
+  const vY = Array(TOTAL).fill(0).map(() => 0);
   const woundLocal = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0}));
-  let freeCount = 1;
+  let freeCount = 0;
 
   const toWorld = (lx, ly, ca, sa, cx, cy) => ({x: cx + (lx * ca - ly * sa), y: cy + (lx * sa + ly * ca)});
   const clamp = (v, a, b) => max(a, min(b, v));
@@ -87,22 +90,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function glue(i, x, y) {
+    rX[i] = x;  rY[i] = y; vX[i] = 0; vY[i] = 0;
+  }
+
   function glueWound() {
     const ca = cos(ball.angle), sa = sin(ball.angle), cx = ball.x, cy = ball.y;
     for (let i = freeCount; i < TOTAL; i++) {
       const L = woundLocal[i], w = toWorld(L.x, L.y, ca, sa, cx, cy);
-      P[i].px = P[i].x = w.x;
-      P[i].py = P[i].y = w.y;
+      glue(i, w.x, w.y);
     }
   }
 
   function initRope() {
     buildWoundPath();
     glueWound();
-    // short dangling tail (kept same simplistic diag seed)
-    const head = P[freeCount], p1x = head.x + SEG, p1y = head.y + SEG + 2, p0x = p1x + SEG, p0y = p1y + SEG + 2;
-    Object.assign(P[freeCount - 1], {x: p1x, y: p1y, px: p1x, py: p1y});
-    Object.assign(P[0], {x: p0x, y: p0y, px: p0x, py: p0y});
   }
 
   initRope();
@@ -172,25 +174,22 @@ document.addEventListener('DOMContentLoaded', () => {
   function integrateTail(dt) {
     const {w, h} = world, g = GRAV * dt * dt;
     for (let i = 0; i < freeCount; i++) {
-      const p = P[i], vx = p.x - p.px, vy = p.y - p.py;
-      p.px = p.x;
-      p.py = p.y;
-      p.x += vx;
-      p.y += vy + g;
-      if (p.y > h) {
-        p.y = h;
-        p.py = p.y + (p.y - p.py) * -REST;
-        p.px = p.x - (p.x - p.px) * (1 - GFRIC);
-      } else if (p.y < 0) {
-        p.y = 0;
-        p.py = p.y + (p.y - p.py) * -WALL;
+      rX[i] += vX[i];
+      rY[i] += vY[i] += g;
+      if (rY[i] > h) {
+        rY[i] = h;
+        vY[i] *= -REST;
+        vX[i] *= GFRIC - 1;
+      } else if (rY[i] < 0) {
+        rY[i] = 0;
+        vY[i] *= -WALL;
       }
-      if (p.x < 0) {
-        p.x = 0;
-        p.px = p.x + (p.x - p.px) * -WALL;
-      } else if (p.x > w) {
-        p.x = w;
-        p.px = p.x + (p.x - p.px) * -WALL;
+      if (rX[i] < 0) {
+        rX[i] = 0;
+        vX[i] *= -WALL;
+      } else if (rX[i] > w) {
+        rX[i] = w;
+        vX[i] *= -WALL;
       }
     }
   }
@@ -198,8 +197,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function satisfy() {
     for (let k = 0; k < ITERS; k++) {
       for (let i = 1; i < TOTAL; i++) {
-        const a = P[i - 1], b = P[i];
-        let dx = b.x - a.x, dy = b.y - a.y, d = hypot(dx, dy) || 1e-6, diff = (d - SEG) / d;
+        let dx = rX[i] - rX[i - 1], dy = rY[i] - rY[i - 1], d = hypot(dx, dy) || 1e-6, diff = (d - SEG) / d;
         let ma = .5, mb = .5;
         if (i >= freeCount && i - 1 >= freeCount) {
           ma = mb = 0;
@@ -210,12 +208,12 @@ document.addEventListener('DOMContentLoaded', () => {
           ma = 0;
           mb = 1;
         }
-        a.x += dx * diff * ma;
-        a.y += dy * diff * ma;
-        b.x -= dx * diff * mb;
-        b.y -= dy * diff * mb;
-        if (i - 1 < freeCount && a.y > world.h) a.y = world.h;
-        if (i < freeCount && b.y > world.h) b.y = world.h;
+        rX[i - 1] += dx * diff * ma;
+        rY[i - 1] += dy * diff * ma;
+        rX[i] -= dx * diff * mb;
+        rY[i] -= dy * diff * mb;
+        if (i - 1 < freeCount && rY[i - 1] > world.h) rY[i - 1] = world.h;
+        if (i < freeCount && rY[i] > world.h) rY[i] = world.h;
       }
     }
   }
@@ -240,7 +238,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // === Render ===
   function drawYarn() {
-    const n = P.length, mid = (a, b) => ({x: (a.x + b.x) * .5, y: (a.y + b.y) * .5});
+    const midpoint = (a, b) => .5 * (a + b);
     const PAL = [{a: .42, w: 3, col: '#f9a9c8'}, {a: .32, w: 3, col: '#8a2b4f'}, {a: .22, w: 3, col: '#6b1f3d'}];
     X.lineCap = 'round';
     X.lineJoin = 'round';
@@ -249,15 +247,13 @@ document.addEventListener('DOMContentLoaded', () => {
       X.globalAlpha = L.a;
       X.lineWidth = L.w;
       X.beginPath();
-      let m01 = mid(P[0], P[1]);
-      X.moveTo(P[0].x, P[0].y);
-      X.quadraticCurveTo(P[0].x, P[0].y, m01.x, m01.y);
+      X.moveTo(rX[0], rY[0]);
+      X.quadraticCurveTo(rX[0], rY[0], midpoint(rX[0], rX[1]), midpoint(rY[0], rY[1]));
       X.stroke();
-      for (let i = 1; i <= n - 2; i++) {
-        const mPrev = mid(P[i - 1], P[i]), mNext = mid(P[i], P[i + 1]);
+      for (let i = 1; i <= TOTAL - 2; i++) {
         X.beginPath();
-        X.moveTo(mPrev.x, mPrev.y);
-        X.quadraticCurveTo(P[i].x, P[i].y, mNext.x, mNext.y);
+        X.moveTo(midpoint(rX[i - 1], rX[i]), midpoint(rY[i - 1], rY[i]));
+        X.quadraticCurveTo(rX[i], rY[i], midpoint(rX[i], rX[i + 1]), midpoint(rY[i], rY[i + 1]));
         X.stroke();
       }
     }
