@@ -26,11 +26,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // === Tunables ===
   const GRAV = 1600, REST = .55, GFRIC = .015, AIR = .997, WALL = .5;
-  const R = 38, LEN = 60, TOTAL = 300, ITERS = 5, SUB_STEPS = 2, pxPerM = 120, SEG = (LEN * pxPerM) / (TOTAL - 1);
-
+  const R = 38, LEN = 50, TOTAL = 500, ITERS = 10, pxPerM = 120, SEG = (LEN * pxPerM) / (TOTAL - 1);
   // === Disk ===
   const ball = {
-    x: world.w * .5, y: world.h * .25, px: world.w * .5 - 120 * (1 / 60), py: world.h * .25, angle: 0, grounded: false, live: true
+    x: world.w * .5, y: world.h * .25, vX: 0, vY: 0, angle: 0, omega: 0, grounded: false, live: true
   };
 
   // === Rope ===
@@ -127,65 +126,73 @@ document.addEventListener('DOMContentLoaded', () => {
 
   initRope();
 
+  function mouseImpulse() {
+    if (!(mouse.down && !pMouse.down && freeCount < TOTAL)) {
+      return;
+    }
+    const dX = mouse.x - ball.x, dY = mouse.y - ball.y;
+    const d = hypot(dX, dY);
+    const nX = dX / d, nY = dY / d;
+    ball.vX += nX * 10;
+    ball.vY += nY * 10;
+    freeSegments(1);
+  }
+
   // === Input ===
   const mouse = {x: 0, y: 0, down: false, t: performance.now()};
-  let pMouse = {x: 0, y: 0, t: performance.now() - 0.01}, timer = 0;
-  const setMouse = e => {
-    pMouse = {x: mouse.x, y: mouse.y, t: mouse.t};
+  let pMouse = {x: 0, y: 0, down: false, t: performance.now() - 0.01}
+  const setMouse = (e, down = false) => {
+    pMouse = {x: mouse.x, y: mouse.y, down: mouse.down, t: mouse.t};
     const r = C.getBoundingClientRect();
     mouse.x = e.clientX - r.left;
     mouse.y = e.clientY - r.top;
+    mouse.down = down;
     mouse.t = performance.now();
   };
   C.addEventListener('pointermove', setMouse);
   C.addEventListener('pointerdown', e => {
-    mouse.down = true;
-    setMouse(e);
+    setMouse(e, true);
+    mouseImpulse();
   });
   C.addEventListener('pointerup', () => mouse.down = false);
 
   // === Physics ===
   function integrateDisk(dt) {
     if (!ball.live) {
-      ball.x = ball.y = ball.px = ball.py = -999;
+      ball.x = ball.y = -999;
+      ball.vX = ball.vY = 0;
       ball.angle = 0;
+      ball.omega = 0;
       ball.grounded = false;
       return;
     }
-    const vx = ball.x - ball.px, vy = ball.y - ball.py;
-    ball.px = ball.x;
-    ball.py = ball.y;
-    ball.x += vx * AIR;
-    ball.y += vy * AIR + GRAV * dt * dt;
+    ball.x += ball.vX * AIR;
+    ball.y += (ball.vY += GRAV * dt * dt) * AIR;
+    ball.angle += ball.omega * AIR;
 
     const {w, h} = world;
     ball.grounded = false;
 
     if (ball.y + R > h) {
       ball.y = h - R;
-      const vpy = ball.py - ball.y;
-      ball.py = ball.y + vpy * -REST;
+      ball.vY *= -REST;
       ball.grounded = true;
     } else if (ball.y - R < 0) {
       ball.y = R;
-      const vpy = ball.py - ball.y;
-      ball.py = ball.y + vpy * -WALL;
+      ball.vY *= -WALL;
     }
 
     if (ball.x - R < 0) {
       ball.x = R;
-      const vpx = ball.px - ball.x;
-      ball.px = ball.x + vpx * -WALL;
+      ball.vX *= -WALL;
     } else if (ball.x + R > w) {
       ball.x = w - R;
-      const vpx = ball.px - ball.x;
-      ball.px = ball.x + vpx * -WALL;
+      ball.vX *= -WALL;
     }
 
     if (ball.grounded) {
-      const dx = ball.x - ball.px;
-      ball.angle += dx / R;
-      ball.px = ball.x - (ball.x - ball.px) * (1 - GFRIC);
+      ball.omega = ball.vX / R;
+      ball.vX *= 1 - GFRIC;
     }
   }
 
@@ -242,26 +249,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (freeCount !== oldCount) rebuildWoundPath();
   }
 
-  function mouseImpulse(now) {
-    timer = max(0, timer - (now - pMouse.t) / 1000);
-    const mdt = 1e-3 * max(1, now - pMouse.t), mvx = (mouse.x - pMouse.x) / mdt, mvy = (mouse.y - pMouse.y) / mdt;
-    let dx = mouse.x - ball.x, dy = mouse.y - ball.y, d = hypot(dx, dy);
-    if (timer > 0 || d > R) return;
-    const base = clamp(-(dx * mvx + dy * mvy), -250, 250) / d, Jx = -dx * base, Jy = -dy * base - 150,
-      vx = (ball.x - ball.px) + Jx * (1 / 60), vy = (ball.y - ball.py) + Jy * (1 / 60);
-    ball.px = ball.x - vx;
-    ball.py = ball.y - vy;
-    // console.log(base, Jx, Jy, vx, vy);
-    freeSegments(hypot(Jx, Jy) / 150);
-    timer = .1;
-  }
-
   // === Render ===
   function drawYarn() {
     X.lineCap = 'round';
     X.lineJoin = 'round';
     X.strokeStyle = '#d43375';
-    X.globalAlpha = 0.5;
+    X.globalAlpha = 1.0;
     X.lineWidth = 3;
 
     // --- draw the wound part (ball-local path) ---
@@ -274,57 +267,52 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const nFree = min(freeCount, TOTAL);
-    if (nFree > 0) {
-      const mX = new Array(nFree - 1), mY = new Array(nFree - 1);
-      for (let i = 0; i < nFree - 1; i++) {
-        mX[i] = midpoint(rX[i], rX[i + 1]);
-        mY[i] = midpoint(rY[i], rY[i + 1]);
-      }
-      X.beginPath();
-      X.moveTo(rX[0], rY[0]);
-      X.quadraticCurveTo(rX[1 - 1], rY[1 - 1], mX[0], mY[0]);
-      for (let i = 1; i < nFree - 1; i++) {
-        X.quadraticCurveTo(rX[i], rY[i], mX[i], mY[i]);
-      }
-      if (nFree < TOTAL) {
-        const bX = ball.x + (wX[nFree] * cos(ball.angle) - wY[nFree] * sin(ball.angle)),
-          bY = ball.y + (wX[nFree] * sin(ball.angle) + wY[nFree] * cos(ball.angle));
-        X.quadraticCurveTo(rX[nFree], rY[nFree], midpoint(rX[nFree - 1], bX), midpoint(rY[nFree - 1], bY));
-        X.quadraticCurveTo(bX, bY, bX, bY);
-      } else {
-        X.quadraticCurveTo(rX[nFree], rY[nFree], rX[nFree], rY[nFree]);
-      }
+    if (nFree <= 0) return;
+
+    const mX = new Array(nFree - 1), mY = new Array(nFree - 1);
+    for (let i = 0; i < nFree - 1; i++) {
+      mX[i] = midpoint(rX[i], rX[i + 1]);
+      mY[i] = midpoint(rY[i], rY[i + 1]);
+    }
+    X.beginPath();
+    X.moveTo(rX[0], rY[0]);
+    X.quadraticCurveTo(rX[1 - 1], rY[1 - 1], mX[0], mY[0]);
+    for (let i = 1; i < nFree - 1; i++) {
+      X.quadraticCurveTo(rX[i], rY[i], mX[i], mY[i]);
+    }
+    if (nFree < TOTAL) {
+      const bX = ball.x + (wX[nFree] * cos(ball.angle) - wY[nFree] * sin(ball.angle)),
+        bY = ball.y + (wX[nFree] * sin(ball.angle) + wY[nFree] * cos(ball.angle));
+      X.quadraticCurveTo(rX[nFree], rY[nFree], midpoint(rX[nFree - 1], bX), midpoint(rY[nFree - 1], bY));
+      X.quadraticCurveTo(bX, bY, bX, bY);
+    } else {
+      X.quadraticCurveTo(rX[nFree], rY[nFree], rX[nFree], rY[nFree]);
     }
     X.stroke();
-
-    X.globalAlpha = 1;
   }
 
 
   // === Main loop ===
   let pStep = performance.now();
   function step(now) {
-    const dt = clamp((now - pStep) / 1000, 0, 0.033), h = dt / SUB_STEPS;
+    const dt = clamp((now - pStep) / 1000, 0, 0.033);
     pStep = now;
-    for (let s = 0; s < SUB_STEPS; s++) {
-      mouseImpulse(now);
-      integrateDisk(h)
-      updateAnchor();
-      integrateTail(h);
-      satisfy();
-    }
+    integrateDisk(dt)
+    updateAnchor();
+    integrateTail(dt);
+    satisfy();
     X.fillStyle = '#222';
-    X.fillRect(0, 0, world.w, world.h); // clear + bg in one
-    X.strokeStyle = 'rgba(255,255,255,.08)';
-    X.lineWidth = 2;
+    X.fillRect(0, 0, world.w, world.h);
+    X.strokeStyle = '#444';
+    X.lineWidth = 50;
     X.beginPath();
     X.moveTo(0, world.h - 1);
     X.lineTo(world.w, world.h - 1);
     X.stroke();
     drawYarn();
-    X.fillStyle = 'rgba(255,255,255,.9)';
+    X.fillStyle = '#fff';
     X.font = '14px system-ui,sans-serif';
-    X.fillText('yarn: ' + ((SEG * (freeCount - 1) / pxPerM).toFixed(1)) + ' m', 12, 22);
+    X.fillText('yarn: ' + ((SEG * freeCount / pxPerM).toFixed(1)) + ' m', 12, 22);
     requestAnimationFrame(step);
   }
 
