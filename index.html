@@ -192,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (ball.grounded) {
-      ball.omega += (1 - GFRIC) * (ball.vX / R - ball.omega);
+      ball.omega += 0.5 * (ball.vX / R - ball.omega);
       ball.vX *= 1 - GFRIC;
     }
   }
@@ -217,6 +217,8 @@ document.addEventListener('DOMContentLoaded', () => {
         rX[i] = w;
         vX[i] *= -WALL;
       }
+      vX[i] *= AIR;
+      vY[i] *= AIR;
     }
   }
 
