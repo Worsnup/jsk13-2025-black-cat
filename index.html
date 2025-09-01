@@ -214,7 +214,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function satisfy() {
     for (let k = 0; k < ITERS; k++) {
-      for (let i = 1; i <= Math.min(TOTAL - 1, freeCount); i++) {
+      for (let i = 1; i <= min(TOTAL - 1, freeCount); i++) {
         let dx = rX[i] - rX[i - 1], dy = rY[i] - rY[i - 1], d = hypot(dx, dy) || 1e-6, diff = (d - SEG) / d;
         let ma = .5, mb = .5;
         if (i >= freeCount && i - 1 >= freeCount) {
@@ -260,14 +260,15 @@ document.addEventListener('DOMContentLoaded', () => {
   function drawYarn() {
     X.lineCap = 'round';
     X.lineJoin = 'round';
+    X.strokeStyle = '#d43375';
+    X.globalAlpha = 0.5;
+    X.lineWidth = 3;
 
+    // --- draw the wound part (ball-local path) ---
     if (woundPath) {
       X.save();
       X.translate(ball.x, ball.y);
       X.rotate(ball.angle);
-      X.strokeStyle = '#d43375';
-      X.globalAlpha = 0.5;
-      X.lineWidth = 3;
       X.stroke(woundPath);
       X.restore();
     }
@@ -279,29 +280,26 @@ document.addEventListener('DOMContentLoaded', () => {
         mX[i] = midpoint(rX[i], rX[i + 1]);
         mY[i] = midpoint(rY[i], rY[i + 1]);
       }
-
-      X.strokeStyle = '#d43375';
-      X.globalAlpha = 0.5;
-      X.lineWidth = 3;
       X.beginPath();
       X.moveTo(rX[0], rY[0]);
-      // head segment
-      X.quadraticCurveTo(rX[0], rY[0], mX[0], mY[0]);
-      // remaining
-      for (let i = 1; i < nFree; i++) {
-        X.moveTo(mX[i - 1], mY[i - 1]);
+      X.quadraticCurveTo(rX[1 - 1], rY[1 - 1], mX[0], mY[0]);
+      for (let i = 1; i < nFree - 1; i++) {
         X.quadraticCurveTo(rX[i], rY[i], mX[i], mY[i]);
       }
       if (nFree < TOTAL) {
-        const ca = cos(ball.angle), sa = sin(ball.angle);
-        X.moveTo(mX[nFree - 1], mY[nFree - 1]);
-        X.quadraticCurveTo(rX[nFree - 1], rY[nFree - 1], ball.x + (wX[freeCount + 1] * ca - wY[freeCount + 1] * sa), ball.y + (wX[freeCount + 1] * sa + wY[freeCount + 1] * ca));
+        const bX = ball.x + (wX[nFree] * cos(ball.angle) - wY[nFree] * sin(ball.angle)),
+          bY = ball.y + (wX[nFree] * sin(ball.angle) + wY[nFree] * cos(ball.angle));
+        X.quadraticCurveTo(rX[nFree], rY[nFree], midpoint(rX[nFree - 1], bX), midpoint(rY[nFree - 1], bY));
+        X.quadraticCurveTo(bX, bY, bX, bY);
+      } else {
+        X.quadraticCurveTo(rX[nFree], rY[nFree], rX[nFree], rY[nFree]);
       }
-      X.stroke();
     }
+    X.stroke();
 
     X.globalAlpha = 1;
   }
+
 
   // === Main loop ===
   let pStep = performance.now();
