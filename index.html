@@ -8,7 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
   B.appendChild(C);
 
   // === Shorthand math ===
-  const {max, min, cos, sin, PI, hypot, random, atan2} = Math;
+  const {max, min, cos, sin, PI, hypot, random, atan2, sqrt} = Math;
 
   // === World / DPI ===
   const DPR = min(2, W.devicePixelRatio || 1), world = {w: 0, h: 0};
@@ -26,7 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // === Tunables ===
   const GRAV = 1600, REST = .55, GFRIC = .015, AIR = .997, WALL = .5;
-  const R = 38, LEN = 50, TOTAL = 500, ITERS = 10, pxPerM = 120, SEG = (LEN * pxPerM) / (TOTAL - 1);
+  const R = 38, LEN = 100, TOTAL = 1000, ITERS = 10, pxPerM = 120, SEG = (LEN * pxPerM) / (TOTAL - 1);
   // === Disk ===
   const ball = {
     x: world.w * .5, y: world.h * .25, vX: 0, vY: 0, angle: 0, omega: 0, grounded: false, live: true
@@ -40,6 +40,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const wX = Array(TOTAL).fill(0).map(() => 0);
   const wY = Array(TOTAL).fill(0).map(() => 0);
   let freeCount = 0;
+  let freedLength = 0;
 
   const clamp = (v, a, b) => max(a, min(b, v));
   const midpoint = (a, b) => .5 * (a + b);
@@ -132,10 +133,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const dX = mouse.x - ball.x, dY = mouse.y - ball.y;
     const d = hypot(dX, dY);
-    const nX = dX / d, nY = dY / d;
+    const nX = dX / d, nY = min(dY / d, -sqrt(2) * 0.5);
     ball.vX += nX * 10;
     ball.vY += nY * 10;
-    freeSegments(1);
+    freeSegments(10);
   }
 
   // === Input ===
@@ -245,7 +246,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const freeSegments = (n = 1) => {
     const oldCount = freeCount;
-    for (let k = 0; k < (n | 0) && freeCount < TOTAL; k++ & freeCount++) ball.live = freeCount < TOTAL;
+    for (let k = 0; k < (n | 0) && freeCount < TOTAL; k++ & freeCount++) {
+      const ca = cos(ball.angle), sa = sin(ball.angle);
+      const rx =  wX[freeCount] * ca - wY[freeCount] * sa;
+      const ry =  wX[freeCount] * sa + wY[freeCount] * ca;
+      rX[freeCount] = ball.x + rx;
+      rY[freeCount] = ball.y + ry;
+      vX[freeCount] = ball.vX - ball.omega * ry;
+      vY[freeCount] = ball.vY + ball.omega * rx;
+      ball.live = freeCount < TOTAL;
+    }
     if (freeCount !== oldCount) rebuildWoundPath();
   }
 
@@ -301,6 +311,8 @@ document.addEventListener('DOMContentLoaded', () => {
     updateAnchor();
     integrateTail(dt);
     satisfy();
+    freedLength = SEG * freeCount * ((TOTAL - 1) / TOTAL) / pxPerM;
+    // Art
     X.fillStyle = '#222';
     X.fillRect(0, 0, world.w, world.h);
     X.strokeStyle = '#444';
@@ -312,7 +324,7 @@ document.addEventListener('DOMContentLoaded', () => {
     drawYarn();
     X.fillStyle = '#fff';
     X.font = '14px system-ui,sans-serif';
-    X.fillText('yarn: ' + ((SEG * freeCount / pxPerM).toFixed(1)) + ' m', 12, 22);
+    X.fillText('yarn: ' + (freedLength.toFixed(1)) + ' m', 12, 22);
     requestAnimationFrame(step);
   }
 
