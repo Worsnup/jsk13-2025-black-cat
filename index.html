@@ -38,14 +38,15 @@ document.addEventListener('DOMContentLoaded', () => {
   const rY = Array(TOTAL).fill(0).map(() => 0);
   const vX = Array(TOTAL).fill(0).map(() => 0);
   const vY = Array(TOTAL).fill(0).map(() => 0);
-  const woundLocal = Array(TOTAL).fill(0).map(() => ({x: 0, y: 0}));
+  const wX = Array(TOTAL).fill(0).map(() => 0);
+  const wY = Array(TOTAL).fill(0).map(() => 0);
   let freeCount = 0;
 
-  const toWorld = (lx, ly, ca, sa, cx, cy) => ({x: cx + (lx * ca - ly * sa), y: cy + (lx * sa + ly * ca)});
   const clamp = (v, a, b) => max(a, min(b, v));
+  const midpoint = (a, b) => .5 * (a + b);
 
   // Build interior anchors for the wound portion
-  function buildWoundPath() {
+  function initWoundPath() {
     const inner = R - 2, outer = R, locals = [];
     const layers = [{tilt: -.35, count: 2, wR: .06, wT: .20}, {tilt: .55, count: 2, wR: .05, wT: .18}, {
       tilt: 1.10, count: 2, wR: .05, wT: .15
@@ -85,26 +86,43 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     for (let i = 0; i < TOTAL; i++) {
       const p = locals[i] || locals[locals.length - 1];
-      woundLocal[i].x = p.x;
-      woundLocal[i].y = p.y;
+      wX[i] = p.x;
+      wY[i] = p.y;
     }
+  }
+
+  let woundPath = null;
+  function rebuildWoundPath() {
+    if (TOTAL - freeCount <= 0) {
+      woundPath = null;
+      return;
+    }
+    const path = new Path2D();
+    const xi = wX[freeCount], yi = wY[freeCount];
+    path.moveTo(xi, yi);
+    path.quadraticCurveTo(xi, yi, midpoint(xi, wX[freeCount + 1] || xi), midpoint(yi, wY[freeCount + 1] || yi));
+    for (let i = freeCount + 1; i <= TOTAL - 2; i++) {
+      path.moveTo(midpoint(wX[i - 1], wX[i]), midpoint(wY[i - 1], wY[i]));
+      path.quadraticCurveTo(wX[i], wY[i], midpoint(wX[i], wX[i + 1]), midpoint(wY[i], wY[i + 1]));
+    }
+    woundPath = path;
   }
 
   function glue(i, x, y) {
     rX[i] = x;  rY[i] = y; vX[i] = 0; vY[i] = 0;
   }
 
-  function glueWound() {
-    const ca = cos(ball.angle), sa = sin(ball.angle), cx = ball.x, cy = ball.y;
-    for (let i = freeCount; i < TOTAL; i++) {
-      const L = woundLocal[i], w = toWorld(L.x, L.y, ca, sa, cx, cy);
-      glue(i, w.x, w.y);
-    }
+  function updateAnchor() {
+    if (freeCount > TOTAL - 1) return;
+    const wx = ball.x + (wX[freeCount] * cos(ball.angle) - wY[freeCount] * sin(ball.angle)),
+      wy = ball.y + (wX[freeCount] * sin(ball.angle) + wY[freeCount] * cos(ball.angle));
+    glue(freeCount, wx, wy);
   }
 
   function initRope() {
-    buildWoundPath();
-    glueWound();
+    initWoundPath();
+    rebuildWoundPath();
+    updateAnchor();
   }
 
   initRope();
@@ -196,7 +214,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function satisfy() {
     for (let k = 0; k < ITERS; k++) {
-      for (let i = 1; i < TOTAL; i++) {
+      for (let i = 1; i <= Math.min(TOTAL - 1, freeCount); i++) {
         let dx = rX[i] - rX[i - 1], dy = rY[i] - rY[i - 1], d = hypot(dx, dy) || 1e-6, diff = (d - SEG) / d;
         let ma = .5, mb = .5;
         if (i >= freeCount && i - 1 >= freeCount) {
@@ -219,7 +237,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   const freeSegments = (n = 1) => {
+    const oldCount = freeCount;
     for (let k = 0; k < (n | 0) && freeCount < TOTAL; k++ & freeCount++) ball.live = freeCount < TOTAL;
+    if (freeCount !== oldCount) rebuildWoundPath();
   }
 
   function mouseImpulse(now) {
@@ -231,32 +251,55 @@ document.addEventListener('DOMContentLoaded', () => {
       vx = (ball.x - ball.px) + Jx * (1 / 60), vy = (ball.y - ball.py) + Jy * (1 / 60);
     ball.px = ball.x - vx;
     ball.py = ball.y - vy;
-    console.log(base, Jx, Jy, vx, vy);
+    // console.log(base, Jx, Jy, vx, vy);
     freeSegments(hypot(Jx, Jy) / 150);
     timer = .1;
   }
 
   // === Render ===
   function drawYarn() {
-    const midpoint = (a, b) => .5 * (a + b);
-    const PAL = [{a: .42, w: 3, col: '#f9a9c8'}, {a: .32, w: 3, col: '#8a2b4f'}, {a: .22, w: 3, col: '#6b1f3d'}];
     X.lineCap = 'round';
     X.lineJoin = 'round';
-    for (const L of PAL) {
-      X.strokeStyle = L.col;
-      X.globalAlpha = L.a;
-      X.lineWidth = L.w;
+
+    if (woundPath) {
+      X.save();
+      X.translate(ball.x, ball.y);
+      X.rotate(ball.angle);
+      X.strokeStyle = '#d43375';
+      X.globalAlpha = 0.5;
+      X.lineWidth = 3;
+      X.stroke(woundPath);
+      X.restore();
+    }
+
+    const nFree = min(freeCount, TOTAL);
+    if (nFree > 0) {
+      const mX = new Array(nFree - 1), mY = new Array(nFree - 1);
+      for (let i = 0; i < nFree - 1; i++) {
+        mX[i] = midpoint(rX[i], rX[i + 1]);
+        mY[i] = midpoint(rY[i], rY[i + 1]);
+      }
+
+      X.strokeStyle = '#d43375';
+      X.globalAlpha = 0.5;
+      X.lineWidth = 3;
       X.beginPath();
       X.moveTo(rX[0], rY[0]);
-      X.quadraticCurveTo(rX[0], rY[0], midpoint(rX[0], rX[1]), midpoint(rY[0], rY[1]));
-      X.stroke();
-      for (let i = 1; i <= TOTAL - 2; i++) {
-        X.beginPath();
-        X.moveTo(midpoint(rX[i - 1], rX[i]), midpoint(rY[i - 1], rY[i]));
-        X.quadraticCurveTo(rX[i], rY[i], midpoint(rX[i], rX[i + 1]), midpoint(rY[i], rY[i + 1]));
-        X.stroke();
+      // head segment
+      X.quadraticCurveTo(rX[0], rY[0], mX[0], mY[0]);
+      // remaining
+      for (let i = 1; i < nFree; i++) {
+        X.moveTo(mX[i - 1], mY[i - 1]);
+        X.quadraticCurveTo(rX[i], rY[i], mX[i], mY[i]);
       }
+      if (nFree < TOTAL) {
+        const ca = cos(ball.angle), sa = sin(ball.angle);
+        X.moveTo(mX[nFree - 1], mY[nFree - 1]);
+        X.quadraticCurveTo(rX[nFree - 1], rY[nFree - 1], ball.x + (wX[freeCount + 1] * ca - wY[freeCount + 1] * sa), ball.y + (wX[freeCount + 1] * sa + wY[freeCount + 1] * ca));
+      }
+      X.stroke();
     }
+
     X.globalAlpha = 1;
   }
 
@@ -266,11 +309,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const dt = clamp((now - pStep) / 1000, 0, 0.033), h = dt / SUB_STEPS;
     pStep = now;
     for (let s = 0; s < SUB_STEPS; s++) {
-      integrateDisk(h);
-      glueWound();
+      mouseImpulse(now);
+      integrateDisk(h)
+      updateAnchor();
       integrateTail(h);
       satisfy();
-      mouseImpulse(now);
     }
     X.fillStyle = '#222';
     X.fillRect(0, 0, world.w, world.h); // clear + bg in one
