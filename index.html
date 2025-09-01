@@ -192,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (ball.grounded) {
-      ball.omega = ball.vX / R;
+      ball.omega += (1 - GFRIC) * (ball.vX / R - ball.omega);
       ball.vX *= 1 - GFRIC;
     }
   }
