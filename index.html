@@ -1,876 +1,596 @@
 <script>
   document.addEventListener('DOMContentLoaded', () => {
-    // === Canvas bootstrap ===
+    // ===== Canvas bootstrap =====
     const $ = document, W = window, B = $.body, C = $.createElement('canvas'), X = C.getContext('2d');
     (document.getElementById('content') || B).innerHTML = '';
-    Object.assign(B.style, {margin: '0', overflow: 'hidden'});
+    Object.assign(B.style, {margin: 0, overflow: 'hidden'});
     Object.assign(C.style, {display: 'block', touchAction: 'none'});
     B.appendChild(C);
 
-    // === Shorthand math ===
-    const {max, min, cos, sin, PI, hypot, random, atan2, sqrt} = Math;
+    // ===== Math helpers =====
+    const {min, max, hypot, sin, cos, PI, atan2, random} = Math;
     const clamp = (v, a, b) => max(a, min(b, v));
-    const midpoint = (a, b) => .5 * (a + b);
-    const cross = (ax,ay,bx,by) => ax*by - ay*bx;
+    const midpoint = (a, b) => 0.5*(a+b);
 
-    // === World / DPI ===
+    // ===== World / DPI =====
     const DPR = min(2, W.devicePixelRatio || 1), world = {w: 0, h: 0};
+
+    // Forward declarations for things used in resize()
+    let sim, platform, peg;
+
     const resize = () => {
-      const w = W.innerWidth || $.documentElement.clientWidth, h = W.innerHeight || $.documentElement.clientHeight;
-      Object.assign(C.style, {width: w + 'px', height: h + 'px'});
-      C.width = (w * DPR) | 0;
-      C.height = (h * DPR) | 0;
-      X.setTransform(DPR, 0, 0, DPR, 0, 0);
-      world.w = C.clientWidth;
-      world.h = C.clientHeight;
-      if (phys) phys.resize(world.w, world.h);
-      if (platform) {
-        // slanted segment platform
-        platform.shape.x1 = world.w*0.1; platform.shape.y1 = world.h*0.7;
-        platform.shape.x2 = world.w*0.7; platform.shape.y2 = world.h*0.6;
-      }
-      if (peg) {
-        peg.pos.x = world.w*0.8; peg.pos.y = world.h*0.4;
+      const w = W.innerWidth || $.documentElement.clientWidth;
+      const h = W.innerHeight || $.documentElement.clientHeight;
+      Object.assign(C.style, {width: w+'px', height: h+'px'});
+      C.width = (w*DPR)|0; C.height=(h*DPR)|0;
+      X.setTransform(DPR,0,0,DPR,0,0);
+      world.w = C.clientWidth; world.h = C.clientHeight;
+
+      // relayout statics
+      platform.x1 = world.w*0.1; platform.y1 = world.h*0.70;
+      platform.x2 = world.w*0.7; platform.y2 = world.h*0.60;
+      peg.x = world.w*0.80; peg.y = world.h*0.40;
+
+      if (sim){
+        sim.bounds = {w: world.w, h: world.h};
+        if (sim.staticSegs[0]){
+          sim.staticSegs[0].x1 = platform.x1; sim.staticSegs[0].y1 = platform.y1;
+          sim.staticSegs[0].x2 = platform.x2; sim.staticSegs[0].y2 = platform.y2;
+          sim.staticSegs[0].r  = platform.r;
+        }
+        if (sim.staticCircs[0]){
+          sim.staticCircs[0].x = peg.x; sim.staticCircs[0].y = peg.y; sim.staticCircs[0].r = peg.r;
+        }
       }
     };
     W.addEventListener('resize', resize);
 
-    // === Tunables ===
-    const EPS = 1e-10;
-    const GRAV = 1600, REST = .55, GFRIC = .015, AIR = .997, WALL = .5;
-    const R = 38, LEN = 100, TOTAL = 1000, ITERS = 1, pxPerM = 30, SEG = (LEN * pxPerM) / (TOTAL - 1);
-    const ROPE_NODE_R = 2; // rope capsule radius (visual thickness proxy)
-    const ROPE_COLLISION_ITERS = 15; // a bit more to stay robust near edges
-    const ROPE_CCD_MAX_MOVE = ROPE_NODE_R * 0.5; // tighter CCD to avoid peg tunneling
-    const ROPE_MAX_SUBSTEPS = 10;                 // perf clamp
-    const INTERSECT_IMPULSE = 50;
+    // ===== XPBD core =====
+    class XPBDSim {
+      constructor(opts){
+        this.g = opts.g ?? 1600;
+        this.air = opts.air ?? 0.997;
+        this.rest = opts.rest ?? 0.55;
+        this.wall = opts.wall ?? 0.5;
+        this.mu   = opts.mu ?? 0.4;
+        this.alphaDist = opts.alphaDist ?? 1e-6;
+        this.alphaContact = opts.alphaContact ?? 1e-6;
+        this.maxSub = opts.maxSub ?? 12;
+        this.cfl = opts.cfl ?? 0.3;
+        this.iters = opts.iters ?? 8;
+        this.bounds = {w: 0, h: 0};
 
-    // === Physics Engine ===
-    function vec(x=0,y=0){return{x,y}}
-    function circleShape(r){return{type:'circle', r}}
-    function segmentShape(x1,y1,x2,y2,r=0){return{type:'segment', x1,y1,x2,y2,r}}
-
-    class RigidBody {
-      constructor(shape, x, y, opts={}) {
-        this.type='rigid';
-        this.shape=shape;
-        this.pos=vec(x,y);
-        this.vel=vec(0,0);
-        this.ang=opts.ang||0;
-        this.omega=opts.omega||0;
-        this.restitution = opts.restitution ?? REST;
-        this.air = opts.air ?? AIR;
-        this.gfric = opts.gfric ?? GFRIC;
-        this.mass = opts.mass ?? 1;
-        this.invMass = this.mass>0? 1/this.mass : 0;
-        this.inertia = opts.inertia ?? (shape.type==='circle'? 0.5*this.mass*(shape.r*shape.r): 1);
-        this.live = true;
+        this.p = [];          // particles
+        this.edges = [];      // [{i,j,len, lambda}]
+        this.capsuleRadius = opts.capsuleRadius ?? 2;
+        this.staticSegs = []; // {x1,y1,x2,y2,r}
+        this.staticCircs = []; // {x,y,r}
+        this.staticBoxes = []; // {x,y,w,h}
+        this.circles = [];    // dynamic circles {id, r, pi}
       }
-    }
-
-    class StaticBody {
-      constructor(shape, x=0, y=0, opts={}) {
-        this.type='static';
-        this.shape=shape;
-        this.pos=vec(x,y);
-        this.ang=opts.ang||0;
-        this.restitution = opts.restitution ?? REST;
+      addParticle(x,y, invM){
+        const i = this.p.length;
+        this.p.push({x,y, px:x,py:y, vx:0,vy:0, invM});
+        return i;
       }
-    }
-
-    class Rope {
-      constructor(n, segLen) {
-        this.n = n;
-        this.seg = segLen;
-        this.x = new Array(n).fill(0);
-        this.y = new Array(n).fill(0);
-        this.px = new Array(n).fill(0);
-        this.py = new Array(n).fill(0);
-        this.vx = new Array(n).fill(0);
-        this.vy = new Array(n).fill(0);
-        this.free = 0;
-        this.anchor = null; // function returning {x,y}
-        this.ignoreRigid = null; // RigidBody or Set<RigidBody> to skip during rope-vs-rigid collisions
-        this.rings = []; // [{i, cx, cy, R, breakV, slop}]
+      addCircle(x,y,r, invM){
+        const i = this.addParticle(x,y, invM);
+        const id = this.circles.length;
+        this.circles.push({id, r, pi: i});
+        return {id, r, pi:i};
       }
-    }
+      addEdge(i,j,len){ this.edges.push({i,j,len, lambda:0}); }
+      addStaticSegment(x1,y1,x2,y2,r=0){ this.staticSegs.push({x1,y1,x2,y2,r}); }
+      addStaticCircle(x,y,r){ this.staticCircs.push({x,y,r}); }
+      addStaticBox(x,y,w,h){ this.staticBoxes.push({x,y,w,h}); }
 
-    class PhysicsWorld {
-      constructor(gravity, w, h) {
-        this.gravity = gravity;
-        this.w = w; this.h = h;
-        this.rigid = [];
-        this.sBodies = [];
-        this.ropes = [];
-        this.iters = ITERS;
-        this.wall = WALL;
-        this.rest = REST;
-        this.air = AIR;
-        this.gfric = GFRIC;
-      }
-      resize(w,h){ this.w=w; this.h=h }
-
-      addRigid(b){ this.rigid.push(b); return b }
-      addStatic(b){ this.sBodies.push(b); return b }
-      addRope(r){ this.ropes.push(r); return r }
-
-      addRingConstraint(r, i, cx, cy, R, breakV=60, slop=2){
-        // if this node already has one, keep the deeper/smaller R
-        const k = r.rings.findIndex(rc => rc.i===i);
-        const rc = {i, cx, cy, R, breakV, slop};
-        if (k>=0) r.rings[k]=rc; else r.rings.push(rc);
-      }
-
-      clearRingAt(r, i){
-        const k = r.rings.findIndex(rc => rc.i===i);
-        if (k>=0) r.rings.splice(k,1);
-      }
-
-      // --- collisions helpers ---
-      collideCircleAABB(px, py, hw, hh, cx, cy, cr){
-        const nx = clamp(cx, px-hw, px+hw);
-        const ny = clamp(cy, py-hh, py+hh);
-        let dx = cx - nx, dy = cy - ny, d = hypot(dx,dy)||1e-6;
-        const pen = cr - d;
-        if (pen>0) { dx/=d; dy/=d; return {nx:dx, ny:dy, pen} }
-        return null;
-      }
-      collideCircleCircle(ax,ay,ar, bx,by,br){
-        let dx=bx-ax, dy=by-ay, d=hypot(dx,dy)||1e-6;
-        const pen = ar+br - d;
-        if (pen>0){ dx/=d; dy/=d; return {nx:dx, ny:dy, pen} }
-        return null;
-      }
-      collideCircleSegment(cx,cy,cr, x1,y1,x2,y2){
-        const abx=x2-x1, aby=y2-y1, apx=cx-x1, apy=cy-y1;
-        const ab2=abx*abx+aby*aby||1;
-        let t=(apx*abx+apy*aby)/ab2; t=clamp(t,0,1);
-        const px=x1+abx*t, py=y1+aby*t;
-        let dx=cx-px, dy=cy-py, d=hypot(dx,dy)||1e-6;
-        const pen = cr - d;
-        if (pen>0){ dx/=d; dy/=d; return {nx:dx, ny:dy, pen} }
-        return null;
-      }
-
-      // --- helpers for rope segment (capsule) collisions ---
-      // closest point on segment AB to point P
+      // --- geometry helpers ---
       closestPointOnSeg(ax,ay,bx,by, px,py){
-        const abx = bx-ax, aby = by-ay;
-        const apx = px-ax, apy = py-ay;
-        const ab2 = abx*abx + aby*aby || 1e-6;
-        let t = (apx*abx + apy*aby) / ab2;
-        t = clamp(t, 0, 1);
-        return { x: ax + abx*t, y: ay + aby*t, t };
+        const abx=bx-ax, aby=by-ay, apx=px-ax, apy=py-ay;
+        const ab2 = abx*abx + aby*aby || 1e-12;
+        let t=(apx*abx+apy*aby)/ab2; t=clamp(t,0,1);
+        return {x: ax + abx*t, y: ay + aby*t, t};
       }
-
       segSegClosest(ax,ay,bx,by, cx,cy,dx,dy){
-        const ux = bx-ax, uy = by-ay;
-        const vx = dx-cx, vy = dy-cy;
-        const wx = ax-cx, wy = ay-cy;
-        const a = ux*ux + uy*uy;           // |u|^2
-        const b = ux*vx + uy*vy;           // u·v
-        const c = vx*vx + vy*vy;           // |v|^2
-        const d = ux*wx + uy*wy;           // u·w
-        const e = vx*wx + vy*wy;           // v·w
-        const D = a*c - b*b;
-        let sc, sN, sD = D;
-        let tc, tN, tD = D;
-        if (D < 1e-8) { // parallel
-          sN = 0; sD = 1;
-          tN = e; tD = c;
-        } else {
-          sN = (b*e - c*d);
-          tN = (a*e - b*d);
-          if (sN < 0) { sN = 0; tN = e; tD = c; }
-          else if (sN > sD) { sN = sD; tN = e + b; tD = c; }
+        const ux=bx-ax, uy=by-ay;
+        const vx=dx-cx, vy=dy-cy;
+        const wx=ax-cx, wy=ay-cy;
+        const a=ux*ux+uy*uy, b=ux*vx+uy*vy, c=vx*vx+vy*vy, d=ux*wx+uy*wy, e=vx*wx+vy*wy;
+        const D=a*c-b*b;
+        let sc, sN, sD=D, tc, tN, tD=D;
+        if (D<1e-10){ sN=0; sD=1; tN=e; tD=c; }
+        else { sN=(b*e-c*d); tN=(a*e-b*d);
+          if (sN<0){ sN=0; tN=e; tD=c; }
+          else if (sN>sD){ sN=sD; tN=e+b; tD=c; }
         }
-        if (tN < 0) {
-          tN = 0;
-          if (-d < 0) sc = 0;
-          else if (-d > a) sc = 1;
-          else { sc = -d/a; }
-        } else if (tN > tD) {
-          tN = tD;
-          if ((-d + b) < 0) sc = 0;
-          else if ((-d + b) > a) sc = 1;
-          else { sc = (-d + b)/a; }
-        } else {
-          sc = (Math.abs(sD) < 1e-8) ? 0 : (sN/sD);
-        }
-        tc = (Math.abs(tD) < 1e-8) ? 0 : (tN/tD);
-        const px = ax + sc*ux, py = ay + sc*uy; // point on AB
-        const qx = cx + tc*vx, qy = cy + tc*vy; // point on CD
-        const dxq = px - qx, dyq = py - qy;
-        const dist = Math.hypot(dxq, dyq);
-        return { px, py, qx, qy, s: sc, t: tc, dist };
+        if (tN<0){ tN=0; if (-d<0) sc=0; else if (-d>a) sc=1; else sc=-d/a; }
+        else if (tN>tD){ tN=tD; if ((-d+b)<0) sc=0; else if ((-d+b)>a) sc=1; else sc=(-d+b)/a; }
+        else sc=(Math.abs(sD)<1e-10?0:sN/sD);
+        tc=(Math.abs(tD)<1e-10?0:tN/tD);
+        const px=ax+sc*ux, py=ay+sc*uy, qx=cx+tc*vx, qy=cy+tc*vy;
+        const dxq=px-qx, dyq=py-qy; const dist=hypot(dxq,dyq)||1e-12;
+        return {px,py,qx,qy,s:sc,t:tc,dist};
       }
-
-      segSegIntersect(ax,ay,bx,by, cx,cy,dx,dy){
-        const rX = bx-ax, rY = by-ay;
-        const sX = dx-cx, sY = dy-cy;
-        const denom = cross(rX,rY, sX,sY);
-        if (Math.abs(denom) < EPS) return null; // parallel
-        const qpx = cx-ax, qpy = cy-ay;
-        const t = cross(qpx,qpy, sX,sY) / denom; // along AB
-        const u = cross(qpx,qpy, rX,rY) / denom; // along CD
-        if (t > EPS && t < 1-EPS && u > EPS && u < 1-EPS){
-          return {hit:true, s:t, t:u, ix: ax + rX*t, iy: ay + rY*t};
-        }
-        return null;
-      }
-
-      // capsule (rope segment with radius rr) vs static circle
-      collideCapsuleCircle(ax,ay,bx,by, rr, cx,cy, cr){
-        const p = this.closestPointOnSeg(ax,ay,bx,by, cx,cy);
-        const dx = p.x - cx, dy = p.y - cy;
-        const d = Math.hypot(dx,dy) || 1e-6;
-        const pen = (rr + cr) - d;
-        if (pen > 0) { return { nx: dx/d, ny: dy/d, pen, s: p.t, px: p.x, py: p.y }; }
-        return null;
-      }
-
-      // capsule vs static segment
       collideCapsuleSegment(ax,ay,bx,by, rr, x1,y1,x2,y2, sr=0){
-        const c = this.segSegClosest(ax,ay,bx,by, x1,y1,x2,y2);
-        const d = c.dist || 1e-6;
-        const pen = (rr + sr) - d; // static segment has zero radius
-        if (pen > 0) {
-          const nx = (c.px - c.qx) / d, ny = (c.py - c.qy) / d;
-          return { nx, ny, pen, s: c.s, px: c.px, py: c.py };
-        }
+        const c=this.segSegClosest(ax,ay,bx,by, x1,y1,x2,y2);
+        const d=c.dist||1e-12, pen=(rr+sr)-d;
+        if (pen>0){ return {nx:(c.px-c.qx)/d, ny:(c.py-c.qy)/d, pen, s:c.s}; }
         return null;
       }
-
-      // capsule vs AABB (by testing 4 edges as segments)
+      collideCapsuleCircle(ax,ay,bx,by, rr, cx,cy, cr){
+        const p=this.closestPointOnSeg(ax,ay,bx,by, cx,cy);
+        let dx=p.x-cx, dy=p.y-cy; const d=hypot(dx,dy)||1e-12;
+        const pen=(rr+cr)-d;
+        if (pen>0){ return {nx:dx/d, ny:dy/d, pen, s:p.t}; }
+        return null;
+      }
       collideCapsuleAABB(ax,ay,bx,by, rr, cx,cy, hw,hh){
         let best=null, bestPen=-1;
-        const xL=cx-hw, xR=cx+hw, yT=cy-hh, yB=cy+hh;
-        const edges=[ [xL,yT,xR,yT], [xR,yT,xR,yB], [xR,yB,xL,yB], [xL,yB,xL,yT] ];
+        const L=cx-hw, R=cx+hw, T=cy-hh, B=cy+hh;
+        const edges=[[L,T,R,T],[R,T,R,B],[R,B,L,B],[L,B,L,T]];
         for(const [ex1,ey1,ex2,ey2] of edges){
-          const hit = this.collideCapsuleSegment(ax,ay,bx,by, rr, ex1,ey1,ex2,ey2);
+          const hit=this.collideCapsuleSegment(ax,ay,bx,by, rr, ex1,ey1,ex2,ey2, 0);
           if (hit && hit.pen>bestPen){ bestPen=hit.pen; best=hit; }
         }
         return best;
       }
-
-      // swept point P->Q vs circle (cx,cy,R). Returns earliest hit in [0,1], else null.
-      sweepPointCircle(px,py, qx,qy, cx,cy, R){
-        const dx = qx - px, dy = qy - py;
-        const fx = px - cx, fy = py - cy;
-        const a = dx*dx + dy*dy;
-        const b = 2*(fx*dx + fy*dy);
-        const c = fx*fx + fy*fy - R*R;
-        // If already outside and moving, solve quadratic
-        const disc = b*b - 4*a*c;
-        if (disc < 0 || a < 1e-12) return null;
-        const s = Math.sqrt(disc);
-        // earliest root in [0,1]
-        let t = (-b - s) / (2*a);
-        if (t < 0 || t > 1){
-          t = (-b + s) / (2*a);
-          if (t < 0 || t > 1) return null;
-        }
-        const hx = px + dx*t, hy = py + dy*t; // hit point
-        let nx = hx - cx, ny = hy - cy;
-        const len = Math.hypot(nx,ny) || 1e-6; nx/=len; ny/=len;
-        return { t, hx, hy, nx, ny };
+      // Circle vs static helpers (for the yarn ball)
+      circleVsSegment(cx,cy,cr, x1,y1,x2,y2, sr=0){
+        const p=this.closestPointOnSeg(x1,y1,x2,y2, cx,cy);
+        const dx=cx-p.x, dy=cy-p.y, d=hypot(dx,dy)||1e-12;
+        const pen = (cr + sr) - d;
+        if (pen>0) return {nx:dx/d, ny:dy/d, pen};
+        return null;
+      }
+      circleVsCircle(ax,ay,ar, bx,by,br){
+        const dx=bx-ax, dy=by-ay, d=hypot(dx,dy)||1e-12;
+        const pen = (ar+br) - d;
+        if (pen>0) return {nx:dx/d, ny:dy/d, pen};
+        return null;
+      }
+      circleVsAABB(cx,cy,cr, bx,by, hw,hh){
+        const nx=clamp(cx, bx-hw, bx+hw);
+        const ny=clamp(cy, by-hh, by+hh);
+        const dx=cx-nx, dy=cy-ny, d=hypot(dx,dy)||1e-12;
+        const pen = cr - d;
+        if (pen>0) return {nx:dx/d, ny:dy/d, pen};
+        return null;
       }
 
-      // --- integrate & collide ---
-      step(dt){
-        const g = this.gravity * dt * dt;
-        const W = this.w, H = this.h;
+      // --- step ---
+      step(dt, ropeRange, ropeRadius, pinIndex, pinPos){
+        const N = this.p.length;
 
-        // Rigid dynamics
-        for (const b of this.rigid){
-          if (!b.live) { b.pos.x=b.pos.y=-999; b.vel.x=b.vel.y=0; b.ang=0; b.omega=0; b.grounded=false; continue; }
-          // integrate
-          b.pos.x += b.vel.x * b.air;
-          b.vel.y += g;
-          b.pos.y += b.vel.y * b.air;
-          b.ang += b.omega * b.air;
-          b.grounded=false;
-          // bounds
-          if (b.shape.type==='circle'){
-            const r = b.shape.r;
-            if (b.pos.y + r > H){ b.pos.y = H - r; b.vel.y *= -this.rest; b.grounded=true; }
-            else if (b.pos.y - r < 0){ b.pos.y = r; b.vel.y *= -this.wall; }
-            if (b.pos.x - r < 0){ b.pos.x = r; b.vel.x *= -this.wall; }
-            else if (b.pos.x + r > W){ b.pos.x = W - r; b.vel.x *= -this.wall; }
-          } else if (b.shape.type==='box'){
-            const hw=b.shape.w*0.5, hh=b.shape.h*0.5;
-            if (b.pos.y + hh > H){ b.pos.y = H - hh; b.vel.y *= -this.rest; b.grounded=true; }
-            else if (b.pos.y - hh < 0){ b.pos.y = hh; b.vel.y *= -this.wall; }
-            if (b.pos.x - hw < 0){ b.pos.x = hw; b.vel.x *= -this.wall; }
-            else if (b.pos.x + hw > W){ b.pos.x = W - hw; b.vel.x *= -this.wall; }
+        // ===== Integrate (semi-implicit Euler) =====
+        for (let i=0;i<N;i++){
+          const a = this.p[i];
+          a.px = a.x; a.py = a.y;
+          if (a.invM){
+            a.vy += this.g * dt * dt;
+            a.x  += a.vx * dt;
+            a.y  += a.vy * dt;
           }
-          if (b.grounded){
-            if (b.shape.type==='circle'){
-              b.omega += 0.5 * (b.vel.x / b.shape.r - b.omega);
+          // screen bounds (dynamic only)
+          if (a.invM){
+            const W = this.bounds.w, H=this.bounds.h;
+            if (a.y > H){ a.y = H; a.vy *= -this.rest; a.vx *= (1-this.mu); }
+            if (a.y < 0){ a.y = 0; a.vy *= -this.wall; }
+            if (a.x < 0){ a.x = 0; a.vx *= -this.wall; }
+            if (a.x > W){ a.x = W; a.vx *= -this.wall; }
+          }
+        }
+
+        // keep a rope node pinned (anchor)
+        if (pinIndex != null && pinIndex >= 0){
+          const p = this.p[pinIndex];
+          p.x = pinPos.x; p.y = pinPos.y;
+          p.vx = 0; p.vy = 0;
+        }
+
+        // ===== Adaptive substeps =====
+        let vmax = 0, rmin = ropeRadius || this.capsuleRadius;
+        const [ri0, ri1] = ropeRange || [0, -1];
+        if (ri1 >= ri0){
+          for (let i=ri0;i<=ri1;i++){
+            const a=this.p[i]; vmax = Math.max(vmax, hypot(a.vx, a.vy));
+          }
+        }
+        for (const s of this.staticCircs) rmin = Math.min(rmin, s.r);
+        for (const s of this.staticSegs) rmin = Math.min(rmin, s.r || rmin);
+        for (const b of this.staticBoxes) rmin = Math.min(rmin, Math.min(b.w*0.5, b.h*0.5));
+        for (const c of this.circles) rmin = Math.min(rmin, c.r);
+        rmin = Math.max(1, rmin);
+        let sub = Math.max(1, Math.min(this.maxSub, Math.ceil((vmax*dt)/(this.cfl*rmin))));
+        const dtSub = dt / sub;
+        const K = Math.max(3, this.iters|0);
+
+        for (let s=0;s<sub;s++){
+          // --- Distance constraints (warm-started XPBD)
+          for (const e of this.edges){
+            const A=this.p[e.i], B=this.p[e.j];
+            const wi=A.invM, wj=B.invM; if (!(wi||wj)) continue;
+            let dx=B.x-A.x, dy=B.y-A.y;
+            const L=hypot(dx,dy)||1e-12;
+            const nx=dx/L, ny=dy/L;
+            const C = L - e.len;
+            if (Math.abs(C)<1e-7) continue;
+            const w = wi+wj;
+            const alpha = this.alphaDist / (dtSub*dtSub + 1e-18);
+            const dl = ( -C - alpha*e.lambda) / (w + alpha);
+            e.lambda += dl;
+            if (wi){ A.x -= dl*wi*nx; A.y -= dl*wi*ny; }
+            if (wj){ B.x += dl*wj*nx; B.y += dl*wj*ny; }
+          }
+
+          // --- Build capsules for free rope portion
+          const caps=[];
+          const rr = ropeRadius || this.capsuleRadius;
+          for (const e of this.edges){
+            if (ri1>=ri0 && !(e.i>=ri0 && e.j<=ri1)) continue;
+            const A=this.p[e.i], B=this.p[e.j];
+            caps.push({e, ax:A.x,ay:A.y, bx:B.x,by:B.y, rr});
+          }
+
+          // --- Contact candidates (speculative)
+          const contacts=[];
+          for (const cap of caps){
+            const Ai=this.p[cap.e.i], Bi=this.p[cap.e.j];
+            const sv = 0.5*(hypot(Ai.vx, Ai.vy) + hypot(Bi.vx, Bi.vy));
+            const rrSpec = cap.rr + sv * (dtSub / (dt + 1e-18));
+            let best=null, bestPen=-1, bestKind='';
+            for (const sSeg of this.staticSegs){
+              const hit=this.collideCapsuleSegment(cap.ax,cap.ay,cap.bx,cap.by, rrSpec, sSeg.x1,sSeg.y1,sSeg.x2,sSeg.y2, sSeg.r||0);
+              if (hit && hit.pen>bestPen){ best=hit; bestPen=hit.pen; bestKind='seg'; }
             }
-            b.vel.x *= 1 - b.gfric;
+            for (const sCir of this.staticCircs){
+              const hit=this.collideCapsuleCircle(cap.ax,cap.ay,cap.bx,cap.by, rrSpec, sCir.x,sCir.y,sCir.r);
+              if (hit && hit.pen>bestPen){ best=hit; bestPen=hit.pen; bestKind='scirc'; }
+            }
+            for (const sBox of this.staticBoxes){
+              const hit=this.collideCapsuleAABB(cap.ax,cap.ay,cap.bx,cap.by, rrSpec, sBox.x,sBox.y,sBox.w*0.5,sBox.h*0.5);
+              if (hit && hit.pen>bestPen){ best=hit; bestPen=hit.pen; bestKind='sbox'; }
+            }
+            for (const d of this.circles){
+              const C=this.p[d.pi];
+              if (d.pi===cap.e.i || d.pi===cap.e.j) continue;
+              const hit=this.collideCapsuleCircle(cap.ax,cap.ay,cap.bx,cap.by, rrSpec, C.x,C.y,d.r);
+              if (hit && hit.pen>bestPen){ best=hit; bestPen=hit.pen; bestKind='dcirc'; best.dyn = d; }
+            }
+            if (best){ contacts.push({cap, hit:best, kind:bestKind, lambda:0}); }
           }
 
-          // rigid vs static collisions
-          for (const s of this.sBodies){
-            const e = s.restitution ?? this.rest;
-            if (b.shape.type==='circle'){
-              const cx=b.pos.x, cy=b.pos.y, cr=b.shape.r;
-              let hit=null;
-              if (s.shape.type==='segment'){
-                const {x1,y1,x2,y2} = s.shape;
-                hit = this.collideCircleSegment(cx,cy,cr, x1,y1,x2,y2);
-              } else if (s.shape.type==='circle'){
-                hit = this.collideCircleCircle(s.pos.x,s.pos.y,s.shape.r, cx,cy,cr);
-              } else if (s.shape.type==='box'){
-                hit = this.collideCircleAABB(s.pos.x,s.pos.y, s.shape.w*0.5, s.shape.h*0.5, cx,cy,cr);
-              }
-              if (hit){
-                b.pos.x += hit.nx * hit.pen;
-                b.pos.y += hit.ny * hit.pen;
-                const vn = b.vel.x*hit.nx + b.vel.y*hit.ny;
-                if (vn<0){
-                  b.vel.x -= (1+e)*vn*hit.nx;
-                  b.vel.y -= (1+e)*vn*hit.ny;
-                }
-              }
+          // --- Solve (contacts + distances)
+          for (let it=0; it<K; it++){
+            // refresh distances a bit (shock-prop)
+            for (const e of this.edges){
+              const A=this.p[e.i], B=this.p[e.j];
+              const wi=A.invM, wj=B.invM; if (!(wi||wj)) continue;
+              let dx=B.x-A.x, dy=B.y-A.y;
+              const L=hypot(dx,dy)||1e-12;
+              const nx=dx/L, ny=dy/L;
+              const C=L - e.len; if (Math.abs(C)<1e-7) continue;
+              const w=wi+wj;
+              const alpha = this.alphaDist / (dtSub*dtSub + 1e-18);
+              const dl = ( -C - alpha*e.lambda) / (w + alpha);
+              e.lambda += dl;
+              if (wi){ A.x -= dl*wi*nx; A.y -= dl*wi*ny; }
+              if (wj){ B.x += dl*wj*nx; B.y += dl*wj*ny; }
+            }
+
+            for (const cc of contacts){
+              const {cap, hit} = cc;
+              const i = cap.e.i, j = cap.e.j;
+              const A=this.p[i], B=this.p[j];
+              const sParam = clamp(hit.s, 0, 1);
+
+              const wi = A.invM*(1-sParam)*(1-sParam);
+              const wj = B.invM*sParam*sParam;
+
+              let wk = 0, dyn=null;
+              if (cc.kind==='dcirc' && hit.dyn){ dyn = this.p[hit.dyn.pi]; wk = dyn.invM; }
+
+              const w = wi + wj + wk;
+              if (w===0) continue; // nothing to move
+
+              // Normal projection (works for statics and dynamics)
+              const nx=hit.nx, ny=hit.ny;
+              const Cn = hit.pen;
+              const alpha = this.alphaContact / (dtSub*dtSub + 1e-18);
+              const dln = ( -Cn - alpha*cc.lambda ) / (w + alpha);
+              cc.lambda += dln;
+
+              if (A.invM){ A.x -= dln*wi*nx; A.y -= dln*wi*ny; }
+              if (B.invM){ B.x += dln*wj*nx; B.y += dln*wj*ny; }
+              if (wk)     { dyn.x += dln*wk*nx; dyn.y += dln*wk*ny; }
+
+              // tangential friction along rope edge
+              let tx = B.x - A.x, ty = B.y - A.y;
+              const tL = hypot(tx,ty)||1e-12; tx/=tL; ty/=tL;
+              const vAx = A.vx, vAy = A.vy;
+              const vBx = B.vx, vBy = B.vy;
+              const vKx = wk ? dyn.vx : 0, vKy = wk ? dyn.vy : 0;
+              const vcx = (vBx*sParam + vAx*(1-sParam)) - vKx;
+              const vcy = (vBy*sParam + vAy*(1-sParam)) - vKy;
+              const vt = vcx*tx + vcy*ty;
+              const jt = clamp(-vt, -this.mu*Math.abs(cc.lambda), this.mu*Math.abs(cc.lambda));
+              if (A.invM){ A.x -= jt*wi*tx; A.y -= jt*wi*ty; }
+              if (B.invM){ B.x += jt*wj*tx; B.y += jt*wj*ty; }
+              if (wk)     { dyn.x += jt*wk*tx; dyn.y += jt*wk*ty; }
             }
           }
 
-          // rigid vs rigid (circle-circle only here)
-          for (const c of this.rigid){
-            if (c===b) continue;
-            if (b.shape.type==='circle' && c.shape.type==='circle'){
-              const hit = this.collideCircleCircle(b.pos.x,b.pos.y,b.shape.r, c.pos.x,c.pos.y,c.shape.r);
-              if (hit){
-                // positional correction
-                const totalInvMass = b.invMass + c.invMass;
-                if (totalInvMass>0){
-                  const corr = hit.pen / totalInvMass;
-                  b.pos.x -= hit.nx * corr * b.invMass;
-                  b.pos.y -= hit.ny * corr * b.invMass;
-                  c.pos.x += hit.nx * corr * c.invMass;
-                  c.pos.y += hit.ny * corr * c.invMass;
-                }
-                // velocity impulse (1D along normal)
-                const relvx = b.vel.x - c.vel.x;
-                const relvy = b.vel.y - c.vel.y;
-                const vn = relvx*hit.nx + relvy*hit.ny;
-                if (vn < 0){
-                  const e = min(b.restitution, c.restitution);
-                  const j = -(1+e)*vn / (totalInvMass||1e-6);
-                  const ix = j*hit.nx, iy=j*hit.ny;
-                  b.vel.x += ix * b.invMass; b.vel.y += iy * b.invMass;
-                  c.vel.x -= ix * c.invMass; c.vel.y -= iy * c.invMass;
-                }
-              }
+          // re-pin after solve
+          if (pinIndex != null && pinIndex >= 0){
+            const p = this.p[pinIndex];
+            p.x = pinPos.x; p.y = pinPos.y;
+          }
+        }
+
+        // ===== Ball (dynamic circle) vs statics =====
+        for (const c of this.circles){
+          const p = this.p[c.pi];
+          // segment statics
+          for (const s of this.staticSegs){
+            const hit = this.circleVsSegment(p.x,p.y,c.r, s.x1,s.y1,s.x2,s.y2, s.r||0);
+            if (hit){
+              p.x += hit.nx * hit.pen;
+              p.y += hit.ny * hit.pen;
+              const vn = p.vx*hit.nx + p.vy*hit.ny;
+              if (vn<0){ p.vx -= (1+this.rest)*vn*hit.nx; p.vy -= (1+this.rest)*vn*hit.ny; }
+              // ground-ish friction
+              const vt = p.vx*(-hit.ny) + p.vy*(hit.nx);
+              const jtf = clamp(-vt, -this.mu*Math.abs(vn), this.mu*Math.abs(vn));
+              p.vx += jtf*(-hit.ny); p.vy += jtf*(hit.nx);
+            }
+          }
+          // circle statics
+          for (const s of this.staticCircs){
+            const hit = this.circleVsCircle(p.x,p.y,c.r, s.x,s.y,s.r);
+            if (hit){
+              p.x -= hit.nx * hit.pen;
+              p.y -= hit.ny * hit.pen;
+              const vn = p.vx*(-hit.nx) + p.vy*(-hit.ny);
+              if (vn<0){ p.vx -= (1+this.rest)*vn*(-hit.nx); p.vy -= (1+this.rest)*vn*(-hit.ny); }
+            }
+          }
+          // boxes (if any)
+          for (const b of this.staticBoxes){
+            const hit = this.circleVsAABB(p.x,p.y,c.r, b.x,b.y,b.w*0.5,b.h*0.5);
+            if (hit){
+              p.x += hit.nx * hit.pen;
+              p.y += hit.ny * hit.pen;
+              const vn = p.vx*hit.nx + p.vy*hit.ny;
+              if (vn<0){ p.vx -= (1+this.rest)*vn*hit.nx; p.vy -= (1+this.rest)*vn*hit.ny; }
             }
           }
         }
 
-        // Rope dynamics + constraints + collisions with everything (CCD substepping)
-        for (const r of this.ropes){
-          const n = r.free;
-          if (n>0) {
-            // --- choose substeps so max intended displacement <= ROPE_CCD_MAX_MOVE
-            let maxDisp = 0;
-            for (let i=0;i<n;i++){
-              // intended full-step displacement magnitude (rough): |v| plus gravity
-              const dvx = r.vx[i];
-              const dvy = r.vy[i] + g; // use g as delta vy contribution this frame
-              const disp = Math.hypot(dvx, dvy);
-              if (disp > maxDisp) maxDisp = disp;
-            }
-            let substeps = Math.max(1, Math.min(ROPE_MAX_SUBSTEPS, Math.ceil(maxDisp / (ROPE_CCD_MAX_MOVE||1))));
-            const alpha = 1 / substeps;      // per-substep scale
-            const gSub = g * alpha;          // gravity per substep
-
-            for (let s=0; s<substeps; s++){
-              // save prev positions for CCD
-              for (let i=0;i<n;i++) { r.px[i]=r.x[i]; r.py[i]=r.y[i]; }
-              // integrate (scaled)
-              for (let i = 0; i < n; i++) {
-                r.x[i] += r.vx[i] * alpha;
-                r.vy[i] += gSub;
-                r.y[i] += r.vy[i] * alpha;
-                // bounds
-                if (r.y[i] > H) { r.y[i]=H; r.vy[i]*=-this.rest; r.vx[i]*=this.gfric-1; }
-                else if (r.y[i] < 0) { r.y[i]=0; r.vy[i]*=-this.wall; }
-                if (r.x[i] < 0) { r.x[i]=0; r.vx[i]*=-this.wall; }
-                else if (r.x[i] > W) { r.x[i]=W; r.vx[i]*=-this.wall; }
-                // damping
-                r.vx[i]*=this.air; r.vy[i]*=this.air;
-              }
-              // distance constraints (fewer iters per substep keeps cost bounded)
-              const it = Math.max(1, Math.floor(this.iters * alpha)); // at least 1
-              for (let k = 0; k < it; k++) {
-                const m = Math.min(r.free, r.n - 1);
-                for (let i = 1; i <= m; i++) {
-                  let dx = r.x[i] - r.x[i - 1], dy = r.y[i] - r.y[i - 1];
-                  let d = Math.hypot(dx, dy) || 1e-6, diff = (d - r.seg) / d;
-                  let ma = .5, mb = .5;
-                  if (i >= r.free && i - 1 >= r.free) { ma=mb=0; }
-                  else if (i >= r.free) { ma=1; mb=0; }
-                  else if (i - 1 >= r.free) { ma=0; mb=1; }
-                  r.x[i - 1] += dx * diff * ma; r.y[i - 1] += dy * diff * ma;
-                  r.x[i]     -= dx * diff * mb; r.y[i]     -= dy * diff * mb;
-                  if (i - 1 < r.free && r.y[i - 1] > H) r.y[i - 1]=H;
-                  if (i     < r.free && r.y[i]     > H) r.y[i]    =H;
-                }
-              }
-              // keep wound anchor pinned this substep
-              if (r.anchor && r.free <= r.n - 1) {
-                const a = r.anchor();
-                r.x[r.free] = a.x; r.y[r.free] = a.y;
-                r.vx[r.free] = r.vy[r.free] = 0;
-              }
-
-              // --- ring constraints: project node onto circle, allow tangential sliding
-              if (r.rings.length){
-                for (let c = 0; c < r.rings.length; c++){
-                  const rc = r.rings[c];
-                  // drop if node is no longer free (became anchor, etc.)
-                  if (rc.i >= r.free){ this.clearRingAt(r, rc.i); c--; continue; }
-                  const i = rc.i;
-                  const dx = r.x[i] - rc.cx, dy = r.y[i] - rc.cy;
-                  let d = Math.hypot(dx,dy) || 1e-6;
-                  // release if rope pulls away hard or drifted too far
-                  const vn = (r.vx[i]*dx + r.vy[i]*dy) / d; // radial speed, + = outwards
-                  if (vn > rc.breakV || d > rc.R + rc.slop*2){
-                    this.clearRingAt(r, i); c--; continue;
-                  }
-                  // project to circle
-                  const s = rc.R / d, deltaY = dy * s;
-                  let deltaX = dx * s;
-                  r.x[i] = rc.cx + deltaX;
-                  r.y[i] = rc.cy + deltaY;
-                  // kill inward normal velocity only (keeps tangential sliding)
-                  const nvn = (r.vx[i]*dx + r.vy[i]*dy) / rc.R; // using radius as |n|
-                  if (nvn < 0){
-                    const nx = dx / rc.R, ny = dy / rc.R;
-                    r.vx[i] -= nvn * nx;
-                    r.vy[i] -= nvn * ny;
-                  }
-                }
-              }
-
-              // collisions per substep (capsule vs statics/rigids)
-              for (let pass = 0; pass < ROPE_COLLISION_ITERS; pass++) {
-                const m = Math.max(0, Math.min(n - 1, r.n - 1));
-                for (let i = 0; i <= m - 1; i++) {
-                  const j = i + 1;
-                  let ax = r.x[i], ay = r.y[i];
-                  let bx = r.x[j], by = r.y[j];
-                  const rr = ROPE_NODE_R;
-
-                  // --- CCD sweeps for endpoints against *circles* (peg + segment caps) ---
-                  // helper to apply a sweep hit to endpoint k
-                  const applySweep = (k, hit) => {
-                    const bias = 0.001; // small outward bias
-                    const hx = hit.hx + hit.nx * bias;
-                    const hy = hit.hy + hit.ny * bias;
-                    if (k === i){ ax = hx; ay = hy; }
-                    else        { bx = hx; by = hy; }
-                    // kill inward normal velocity
-                    const vn = (k===i ? r.vx[i]*hit.nx + r.vy[i]*hit.ny
-                      : r.vx[j]*hit.nx + r.vy[j]*hit.ny);
-                    if (vn < 0){
-                      if (k===i){ r.vx[i] -= vn*hit.nx; r.vy[i] -= vn*hit.ny; }
-                      else      { r.vx[j] -= vn*hit.nx; r.vy[j] -= vn*hit.ny; }
-                    }
-                  };
-
-                  // 4a) sweep vs peg (circle)
-                  for (const s of this.sBodies){
-                    if (s.shape.type === 'circle') {
-                      const Rsum = s.shape.r + rr;
-                      const h0 = this.sweepPointCircle(r.px[i], r.py[i], ax, ay, s.pos.x, s.pos.y, Rsum);
-                      if (h0) applySweep(i, h0);
-                      const h1 = this.sweepPointCircle(r.px[j], r.py[j], bx, by, s.pos.x, s.pos.y, Rsum);
-                      if (h1) applySweep(j, h1);
-                    }
-                    if (s.shape.type ===  'segment' && s.shape.r) {
-                      const capR = s.shape.r + rr;
-                      const {x1, y1, x2, y2} = s.shape;
-                      const h00 = this.sweepPointCircle(r.px[i], r.py[i], ax, ay, x1, y1, capR);
-                      if (h00) applySweep(i, h00);
-                      const h01 = this.sweepPointCircle(r.px[i], r.py[i], ax, ay, x2, y2, capR);
-                      if (h01) applySweep(i, h01);
-                      const h10 = this.sweepPointCircle(r.px[j], r.py[j], bx, by, x1, y1, capR);
-                      if (h10) applySweep(j, h10);
-                      const h11 = this.sweepPointCircle(r.px[j], r.py[j], bx, by, x2, y2, capR);
-                      if (h11) applySweep(j, h11);
-                    }
-                  }
-                  // statics
-                  for (const s of this.sBodies) {
-                    let hit = null;
-                    if (s.shape.type === 'segment') {
-                      const {x1,y1,x2,y2,r:capR=0} = s.shape;
-                      // 1) against the thin segment
-                      let best = this.collideCapsuleSegment(ax,ay,bx,by, rr, x1,y1,x2,y2, capR);
-                      // 2) against rounded caps at both ends
-                      const h1 = this.collideCapsuleCircle(ax,ay,bx,by, rr, x1,y1, capR);
-                      const h2 = this.collideCapsuleCircle(ax,ay,bx,by, rr, x2,y2, capR);
-                      // choose deepest penetration (if any)
-                      hit = best;
-                      if (!hit || (h1 && h1.pen > hit.pen)) hit = h1;
-                      if (!hit || (h2 && h2.pen > hit.pen)) hit = h2;
-
-                      // --- hard intersection test: rope edge AB vs static segment (x1,y1)-(x2,y2)
-                      const inter = phys.segSegIntersect(ax,ay,bx,by, x1,y1,x2,y2);
-                      if (inter && inter.hit) {
-                        // choose endpoint: prefer the lower (greater y). If equal y, use nearer to intersection.
-                        let ex = x2, ey = y2;
-                        const d1 = (inter.ix-x1)**2 + (inter.iy-y1)**2;
-                        const d2 = (inter.ix-x2)**2 + (inter.iy-y2)**2;
-                        if (d1 < d2) { ex = x1; ey = y1; } else { ex = x2; ey = y2; }
-
-                        // push along direction from intersection → chosen endpoint
-                        let dx = ex - inter.ix, dy = ey - inter.iy;
-                        const L = Math.hypot(dx,dy) || 1e-6; dx/=L; dy/=L;
-
-                        // distribute to the two rope nodes by barycentric weights along AB
-                        const w0 = 1 - inter.s, w1 = inter.s;
-                        r.vx[i] += dx * INTERSECT_IMPULSE * w0;
-                        r.vy[i] += dy * INTERSECT_IMPULSE * w0;
-                        r.vx[j] += dx * INTERSECT_IMPULSE * w1;
-                        r.vy[j] += dy * INTERSECT_IMPULSE * w1;
-                        r.px[i] = r.x[i] - r.vx[i];
-                        r.py[i] = r.y[i] - r.vy[i];
-                        r.px[j] = r.x[j] - r.vx[j];
-                        r.py[j] = r.y[j] - r.vy[j];
-
-                        // (optional) tiny positional bias to immediately separate one frame later:
-                        const SEP = 0.05; // keep small; it's purely a nudge
-                        ax += dx * SEP * w0; ay += dy * SEP * w0;
-                        bx += dx * SEP * w1; by += dy * SEP * w1;
-                      }
-
-                      // If we touched a tip, create a ring at that tip so the node can’t pop through.
-                      // Choose the endpoint (i or j) that was closest on this capsule hit.
-                      if (capR > 0){
-                        const Rcap = capR + rr;
-                        // which tip was nearer?
-                        const d1i = (r.x[i]-x1)**2 + (r.y[i]-y1)**2;
-                        const d1j = (r.x[j]-x1)**2 + (r.y[j]-y1)**2;
-                        const d2i = (r.x[i]-x2)**2 + (r.y[i]-y2)**2;
-                        const d2j = (r.x[j]-x2)**2 + (r.y[j]-y2)**2;
-                        // pick smallest of four distances
-                        let who = i, cx=x1, cy=y1, dmin=d1i;
-                        if (d1j < dmin){ who=j; dmin=d1j; cx=x1; cy=y1; }
-                        if (d2i < dmin){ who=i; dmin=d2i; cx=x2; cy=y2; }
-                        if (d2j < dmin){ who=j; dmin=d2j; cx=x2; cy=y2; }
-                        // only add if we are actually within capture band
-                        const dReal = Math.hypot(r.x[who]-cx, r.y[who]-cy);
-                        if (dReal <= Rcap + 2) this.addRingConstraint(r, who, cx, cy, Rcap);
-                      }
-                    } else if (s.shape.type === 'circle') {
-                      hit = this.collideCapsuleCircle(ax,ay,bx,by, rr, s.pos.x, s.pos.y, s.shape.r);
-                      if (hit){
-                        const Rpeg = s.shape.r + rr;
-                        // bind closer endpoint to the peg’s ring
-                        const di = Math.hypot(r.x[i]-s.pos.x, r.y[i]-s.pos.y);
-                        const dj = Math.hypot(r.x[j]-s.pos.x, r.y[j]-s.pos.y);
-                        const who = (di < dj ? i : j);
-                        if (Math.min(di,dj) <= Rpeg + 2) this.addRingConstraint(r, who, s.pos.x, s.pos.y, Rpeg);
-                      }
-                    } else if (s.shape.type === 'box') {
-                      hit = this.collideCapsuleAABB(ax,ay,bx,by, rr, s.pos.x, s.pos.y, s.shape.w*0.5, s.shape.h*0.5);
-                    }
-                    if (hit) {
-                      let w0 = 0.5, w1 = 0.5;
-                      if (j >= r.free) { w1 = 0; w0 = 1; }
-                      if (i >= r.free) { w0 = 0; w1 = 1; }
-                      const dx = hit.nx * hit.pen, dy = hit.ny * hit.pen;
-                      ax += dx * w0; ay += dy * w0;
-                      bx += dx * w1; by += dy * w1;
-                      const vn0 = r.vx[i]*hit.nx + r.vy[i]*hit.ny;
-                      const vn1 = r.vx[j]*hit.nx + r.vy[j]*hit.ny;
-                      const e = s.restitution ?? this.rest;
-                      if (vn0 < 0) { r.vx[i] -= (1+e)*vn0*hit.nx; r.vy[i] -= (1+e)*vn0*hit.ny; }
-                      if (vn1 < 0 && j < r.free) { r.vx[j] -= (1+e)*vn1*hit.nx; r.vy[j] -= (1+e)*vn1*hit.ny; }
-                    }
-                  }
-                  // rigids (skip ignored)
-                  for (const b of this.rigid) {
-                    if (r.ignoreRigid && (r.ignoreRigid === b || (r.ignoreRigid instanceof Set && r.ignoreRigid.has(b)))) continue;
-                    let hit = null;
-                    if (b.shape.type === 'circle') {
-                      hit = this.collideCapsuleCircle(ax,ay,bx,by, rr, b.pos.x, b.pos.y, b.shape.r);
-                    } else if (b.shape.type === 'box') {
-                      hit = this.collideCapsuleAABB(ax,ay,bx,by, rr, b.pos.x, b.pos.y, b.shape.w*0.5, b.shape.h*0.5);
-                    }
-                    if (hit) {
-                      let w0 = 0.5, w1 = 0.5;
-                      if (j >= r.free) { w1 = 0; w0 = 1; }
-                      if (i >= r.free) { w0 = 0; w1 = 1; }
-                      const dx = hit.nx * hit.pen, dy = hit.ny * hit.pen;
-                      ax += dx * w0; ay += dy * w0;
-                      bx += dx * w1; by += dy * w1;
-                      const vn0 = r.vx[i]*hit.nx + r.vy[i]*hit.ny;
-                      const vn1 = r.vx[j]*hit.nx + r.vy[j]*hit.ny;
-                      const e = Math.min(this.rest, b.restitution);
-                      if (vn0 < 0) { r.vx[i] -= (1+e)*vn0*hit.nx; r.vy[i] -= (1+e)*vn0*hit.ny; }
-                      if (vn1 < 0 && j < r.free) { r.vx[j] -= (1+e)*vn1*hit.nx; r.vy[j] -= (1+e)*vn1*hit.ny; }
-                    }
-                  }
-                  // write back
-                  r.x[i] = ax; r.y[i] = ay;
-                  r.x[j] = bx; r.y[j] = by;
-                }
-              }
-            } // end substeps
-          }
+        // ===== velocities from positional updates + air-damp
+        for (let i=0;i<N;i++){
+          const a=this.p[i];
+          const invDt = 1/(dt||1e-9);
+          const vx = (a.x - a.px) * invDt;
+          const vy = (a.y - a.py) * invDt;
+          a.vx = vx * this.air;
+          a.vy = vy * this.air;
         }
       }
     }
 
-    // === Yarn: wraps disk + rope + winding/anchor logic ===
-    class Yarn {
-      constructor(phys, opts){
-        this.phys = phys;
-        // rope parameters
-        this.TOTAL = opts.total;
-        this.SEG = opts.seg;
-        this.R = opts.radius;
-        // wound path local coords
-        this.wX = new Array(this.TOTAL).fill(0);
-        this.wY = new Array(this.TOTAL).fill(0);
-        this.freeCount = 0;
-        this.woundPath = null;
-
-        // disk as a rigid body
-        this.disk = new RigidBody(circleShape(this.R), opts.x, opts.y, {mass: 1});
-        this.phys.addRigid(this.disk);
-
-        // rope data
-        this.rope = new Rope(this.TOTAL, this.SEG);
-        this.rope.ignoreRigid = this.disk; // or: new Set([this.disk]) if you’ll add more later
-        this.phys.addRope(this.rope);
-
-        // initialize rope arrays & anchor
-        this.initWoundPath();
-        this.rebuildWoundPath();
-        this.rope.anchor = () => {
-          if (this.freeCount > this.TOTAL - 1) return {x:this.disk.pos.x, y:this.disk.pos.y};
-          const ca = cos(this.disk.ang), sa = sin(this.disk.ang);
-          const wx = this.disk.pos.x + (this.wX[this.freeCount] * ca - this.wY[this.freeCount] * sa);
-          const wy = this.disk.pos.y + (this.wX[this.freeCount] * sa + this.wY[this.freeCount] * ca);
-          return {x: wx, y: wy};
-        };
-      }
-
-      initWoundPath(){
-        const inner = this.R - 2, outer = this.R, locals=[];
-        const layers = [
-          {tilt: -.35, count: 2, wR: .06, wT: .20},
-          {tilt:  .55, count: 2, wR: .05, wT: .18},
-          {tilt: 1.10, count: 2, wR: .05, wT: .15}
-        ];
-        const pushFar = p => {
-          if (locals.length===0){ locals.push(p); return; }
-          const q=locals[locals.length-1], d=hypot(p.x-q.x,p.y-q.y);
-          if (!q || d < this.SEG){
-            const nx=(p.x-q.x)/d, ny=(p.y-q.y)/d;
-            locals.push({x:q.x+nx*this.SEG, y:q.y+ny*this.SEG});
-          } else locals.push(p);
-        };
-        pushFar({x:inner,y:inner});
-        for (const L of layers){
-          for (let k=0;k<L.count;k++){
-            const phase=(k+.5)/L.count*PI*.7, ct=cos(L.tilt+phase), st=sin(L.tilt+phase);
-            for (let a=-PI*.98; a<=PI*.98; a+=PI){
-              const ca=cos(a), sa=sin(a);
-              let x=inner*(ca*ct - sa*st), y=inner*(ca*st + sa*ct);
-              const t=(a+PI)/(2*PI), inward=.25+.75*sin(t*PI), r=inner+2*L.wR*inward;
-              const len=hypot(x,y)||1; x*=r/len; y*=r/len;
-              const jitter=(sin((a+phase)*23.71)*.5+.5)*L.wT, ang=atan2(y,x)+jitter*.15;
-              pushFar({x:r*cos(ang), y:r*sin(ang)});
-            }
+    // ===== Yarn system (disk + wound path + rope) =====
+    function buildWoundPath(total, segLen, R){
+      const wX = new Array(total).fill(0), wY = new Array(total).fill(0);
+      const inner = R - 2, outer = R;
+      const locals=[];
+      const pushFar = p => {
+        if (!locals.length){ locals.push(p); return; }
+        const q=locals[locals.length-1], d=hypot(p.x-q.x,p.y-q.y);
+        if (d < segLen){
+          const nx=(p.x-q.x)/(d||1), ny=(p.y-q.y)/(d||1);
+          locals.push({x:q.x+nx*segLen, y:q.y+ny*segLen});
+        } else locals.push(p);
+      };
+      pushFar({x: inner, y: inner});
+      const layers = [
+        {tilt:-.35, count:2, wR:.06, wT:.20},
+        {tilt: .55, count:2, wR:.05, wT:.18},
+        {tilt: 1.10, count:2, wR:.05, wT:.15}
+      ];
+      for (const L of layers){
+        for (let k=0;k<L.count;k++){
+          const phase=(k+.5)/L.count*PI*.7, ct=cos(L.tilt+phase), st=sin(L.tilt+phase);
+          for (let a=-PI*.98; a<=PI*.98; a+=PI){
+            const ca=cos(a), sa=sin(a);
+            let x=inner*(ca*ct - sa*st), y=inner*(ca*st + sa*ct);
+            const t=(a+PI)/(2*PI), inward=.25+.75*sin(t*PI), r=inner+2*L.wR*inward;
+            const len=hypot(x,y)||1; x*=r/len; y*=r/len;
+            const jitter=(sin((a+phase)*23.71)*.5+.5)*L.wT, ang=atan2(y,x)+jitter*.15;
+            pushFar({x:r*cos(ang), y:r*sin(ang)});
           }
         }
-        while (locals.length < this.TOTAL){
-          const a=random()*PI*2, rr=outer+(inner-outer)*random();
-          pushFar({x: rr*cos(a), y: rr*sin(a)});
-        }
-        for (let i=0;i<this.TOTAL;i++){
-          const p=locals[i]||locals[locals.length-1];
-          this.wX[i]=p.x; this.wY[i]=p.y;
-        }
-        // seed rope arrays to zero; anchor will set index freeCount
-        for (let i=0;i<this.TOTAL;i++){ this.rope.x[i]=0; this.rope.y[i]=0; this.rope.vx[i]=0; this.rope.vy[i]=0; }
-        this.updateAnchorPin();
       }
-
-      rebuildWoundPath(){
-        if (this.TOTAL - this.freeCount <= 0){ this.woundPath=null; return; }
-        const path = new Path2D();
-        const xi=this.wX[this.freeCount], yi=this.wY[this.freeCount];
-        path.moveTo(xi, yi);
-        path.quadraticCurveTo(xi, yi, midpoint(xi, this.wX[this.freeCount+1]||xi), midpoint(yi, this.wY[this.freeCount+1]||yi));
-        for (let i=this.freeCount+1; i<=this.TOTAL-2; i++){
-          path.moveTo(midpoint(this.wX[i-1], this.wX[i]), midpoint(this.wY[i-1], this.wY[i]));
-          path.quadraticCurveTo(this.wX[i], this.wY[i], midpoint(this.wX[i], this.wX[i+1]), midpoint(this.wY[i], this.wY[i+1]));
-        }
-        this.woundPath = path;
+      while (locals.length < total){
+        const a=random()*PI*2, rr=outer+(inner-outer)*random();
+        pushFar({x: rr*cos(a), y: rr*sin(a)});
       }
+      for (let i=0;i<total;i++){ const p=locals[i]||locals[locals.length-1]; wX[i]=p.x; wY[i]=p.y; }
+      return {wX, wY};
+    }
 
-      updateAnchorPin(){
-        if (this.freeCount > this.TOTAL-1) return;
-        const ca=cos(this.disk.ang), sa=sin(this.disk.ang);
-        const wx=this.disk.pos.x + (this.wX[this.freeCount]*ca - this.wY[this.freeCount]*sa);
-        const wy=this.disk.pos.y + (this.wX[this.freeCount]*sa + this.wY[this.freeCount]*ca);
-        this.rope.x[this.freeCount]=wx; this.rope.y[this.freeCount]=wy;
-        this.rope.vx[this.freeCount]=0; this.rope.vy[this.freeCount]=0;
+    // ===== Scene build =====
+    const TOTAL = 1000;
+    const pxPerM = 30;
+    const LEN_M = 100;
+    const SEG = (LEN_M * pxPerM) / (TOTAL - 1);
+    const RADIUS = 38;
+    const ROPE_R = 2;
+    const XP = {
+      g: 1600, air: 0.997, rest: 0.55, wall: 0.5, mu: 0.4,
+      alphaDist: 1e-7, alphaContact: 1e-7,
+      cfl: 0.3, maxSub: 12, iters: 10, capsuleRadius: ROPE_R
+    };
+
+    sim = new XPBDSim(XP);
+
+    // Dynamic disk (yarn ball)
+    const ball = sim.addCircle(0,0, RADIUS, 1);
+    // Rope nodes
+    const ropeIdx = [];
+    for (let i=0;i<TOTAL;i++){ ropeIdx.push(sim.addParticle(0,0, 1)); }
+    for (let i=0;i<TOTAL-1;i++){ sim.addEdge(ropeIdx[i], ropeIdx[i+1], SEG); }
+
+    // Statics
+    platform = {x1:0,y1:0,x2:0,y2:0, r:15};
+    peg = {x:0,y:0, r:24};
+    sim.addStaticSegment(0,0,0,0, platform.r);
+    sim.addStaticCircle(0,0, peg.r);
+
+    // Wound path
+    const wound = buildWoundPath(TOTAL, SEG, RADIUS);
+    let freeCount = 0;
+
+    function worldAnchor(i, cx,cy, ang){
+      const ca=cos(ang), sa=sin(ang);
+      const wx = cx + (wound.wX[i]*ca - wound.wY[i]*sa);
+      const wy = cy + (wound.wX[i]*sa + wound.wY[i]*ca);
+      return {x:wx, y:wy};
+    }
+
+    function layoutInitial(){
+      resize();
+      const cx = world.w*0.5, cy = world.h*0.25;
+      const bi = ball.pi;
+      sim.p[bi].x = cx; sim.p[bi].y = cy;
+      sim.p[bi].px = cx; sim.p[bi].py = cy;
+      sim.p[bi].vx = 0; sim.p[bi].vy = 0;
+
+      for (let i=0;i<TOTAL;i++){
+        const a = worldAnchor(i, cx, cy, 0);
+        const p = sim.p[ropeIdx[i]];
+        p.x=a.x; p.y=a.y; p.px=a.x; p.py=a.y; p.vx=0; p.vy=0;
       }
+      freeCount = 0;
+    }
+    layoutInitial();
 
-      freeSegments(n=1){
-        const old=this.freeCount;
-        for (let k=0; k<(n|0) && this.freeCount<this.TOTAL; k++ & this.freeCount++){
-          const ca=cos(this.disk.ang), sa=sin(this.disk.ang);
-          const rx=this.wX[this.freeCount]*ca - this.wY[this.freeCount]*sa;
-          const ry=this.wX[this.freeCount]*sa + this.wY[this.freeCount]*ca;
-          const i=this.freeCount;
-          this.rope.x[i]=this.disk.pos.x + rx;
-          this.rope.y[i]=this.disk.pos.y + ry;
-          this.rope.vx[i]=this.disk.vel.x - this.disk.omega * ry;
-          this.rope.vy[i]=this.disk.vel.y + this.disk.omega * rx;
-        }
-        this.rope.free = this.freeCount;
-        if (this.freeCount !== old) this.rebuildWoundPath();
-      }
-
-      // drawing helpers
-      draw(X){
-        // wound part: Disk-local stroke
-        if (this.woundPath){
-          X.save();
-          X.translate(this.disk.pos.x, this.disk.pos.y);
-          X.rotate(this.disk.ang);
-          X.lineCap='round'; X.lineJoin='round'; X.strokeStyle='#d43375'; X.lineWidth=3;
-          X.stroke(this.woundPath);
-          X.restore();
-        }
-        // tail
-        const nFree = min(this.freeCount, this.TOTAL);
-        if (nFree<=0) return;
-        const mX = new Array(nFree-1), mY = new Array(nFree-1);
-        for (let i=0;i<nFree-1;i++){ mX[i]=midpoint(this.rope.x[i], this.rope.x[i+1]); mY[i]=midpoint(this.rope.y[i], this.rope.y[i+1]); }
-        X.lineCap='round'; X.lineJoin='round'; X.strokeStyle='#d43375'; X.lineWidth=3;
-        X.beginPath();
-        X.moveTo(this.rope.x[0], this.rope.y[0]);
-        X.quadraticCurveTo(this.rope.x[0], this.rope.y[0], mX[0], mY[0]);
-        for (let i=1;i<nFree-1;i++){ X.quadraticCurveTo(this.rope.x[i], this.rope.y[i], mX[i], mY[i]); }
-        if (nFree < this.TOTAL){
-          const ca=cos(this.disk.ang), sa=sin(this.disk.ang);
-          const bX=this.disk.pos.x + (this.wX[nFree]*ca - this.wY[nFree]*sa);
-          const bY=this.disk.pos.y + (this.wX[nFree]*sa + this.wY[nFree]*ca);
-          X.quadraticCurveTo(this.rope.x[nFree], this.rope.y[nFree], midpoint(this.rope.x[nFree-1], bX), midpoint(this.rope.y[nFree-1], bY));
-          X.quadraticCurveTo(bX, bY, bX, bY);
-        } else {
-          X.quadraticCurveTo(this.rope.x[nFree], this.rope.y[nFree], this.rope.x[nFree], this.rope.y[nFree]);
-        }
-        X.stroke();
+    function freeSegments(n=1){
+      const cx = sim.p[ball.pi].x, cy = sim.p[ball.pi].y;
+      for (let k=0;k<n && freeCount<TOTAL; k++){
+        const i = freeCount;
+        const a = worldAnchor(i, cx, cy, 0);
+        const p = sim.p[ropeIdx[i]];
+        const bx = sim.p[ball.pi].vx, by = sim.p[ball.pi].vy;
+        p.x=a.x; p.y=a.y; p.vx = bx; p.vy = by;
+        freeCount++;
       }
     }
 
-    // === Build physics world & scene ===
-    const phys = new PhysicsWorld(GRAV, world.w, world.h);
-
-    // Static bodies
-    // Platform as StaticBody('segment')
-    let platform = phys.addStatic(new StaticBody(
-      segmentShape(0,0,0,0,15) // r = half of line width (15px) for rounded caps
-    ));
-
-    // Peg as StaticBody('circle')
-    let peg = phys.addStatic(new StaticBody(
-      circleShape(24), 0, 0
-    ));
-
-    // Yarn (disk + rope + winding)
-    const yarn = new Yarn(phys, {
-      total: TOTAL, seg: SEG, radius: R,
-      x: world.w*0.5, y: world.h*0.25
-    });
-
-    // First layout pass
-    resize();
-
-    // Position static bodies after we know world size
-    platform.shape.x1 = world.w*0.1; platform.shape.y1 = world.h*0.7;
-    platform.shape.x2 = world.w*0.7; platform.shape.y2 = world.h*0.6;
-    peg.pos.x = world.w*0.8; peg.pos.y = world.h*0.4;
-
-    // === Input ===
-    const mouse = {x: 0, y: 0, down: false, t: performance.now()};
-    let pMouse = {x: 0, y: 0, down: false, t: performance.now() - 0.01};
-    function setMouse(e, down=false){
-      pMouse = {x: mouse.x, y: mouse.y, down: mouse.down, t: mouse.t};
-      const r = C.getBoundingClientRect();
-      mouse.x = e.clientX - r.left;
-      mouse.y = e.clientY - r.top;
-      mouse.down = down;
+    // ==== Input ====
+    const mouse={x:0,y:0, down:false, t:performance.now()};
+    function setMouse(e,down=null){
+      const r=C.getBoundingClientRect();
+      mouse.x=e.clientX - r.left; mouse.y=e.clientY - r.top;
+      if (down!=null) mouse.down=down;
       mouse.t = performance.now();
     }
-    C.addEventListener('pointermove', setMouse);
-    C.addEventListener('pointerdown', e => {
-      setMouse(e, true);
-      // impulse + unwind a few segments
-      const dX = mouse.x - yarn.disk.pos.x, dY = mouse.y - yarn.disk.pos.y;
-      const d = hypot(dX, dY) || 1;
-      const nX = dX / d, nY = min(dY / d, -sqrt(2) * 0.5);
-      yarn.disk.vel.x += nX * 10;
-      yarn.disk.vel.y += nY * 10;
-      yarn.freeSegments(10);
+    C.addEventListener('pointermove', e=>setMouse(e));
+    C.addEventListener('pointerdown', e=>{
+      setMouse(e,true);
+      const b = sim.p[ball.pi];
+      let dx=mouse.x-b.x, dy=mouse.y-b.y;
+      const d=hypot(dx,dy)||1; dx/=d; dy/=d;
+      dy = Math.min(dy, -Math.SQRT1_2);
+      b.vx += dx * 10; b.vy += dy * 10;
+      freeSegments(12);
     });
-    C.addEventListener('pointerup', () => mouse.down=false);
+    C.addEventListener('pointerup', ()=>{ mouse.down=false; });
 
-    // === Main loop ===
+    // ==== Render helpers ====
+    function drawWoundPath(X, cx,cy){
+      if (freeCount >= TOTAL-1) return;
+      X.save();
+      X.translate(cx,cy);
+      X.lineCap='round'; X.lineJoin='round'; X.strokeStyle='#d43375'; X.lineWidth=3;
+
+      X.beginPath();
+      let i0 = freeCount;
+      let xi=wound.wX[i0], yi=wound.wY[i0];
+      X.moveTo(xi, yi);
+      X.quadraticCurveTo(xi, yi, midpoint(xi, wound.wX[i0+1]||xi), midpoint(yi, wound.wY[i0+1]||yi));
+      for (let i=i0+1; i<=TOTAL-2; i++){
+        X.moveTo(midpoint(wound.wX[i-1], wound.wX[i]), midpoint(wound.wY[i-1], wound.wY[i]));
+        X.quadraticCurveTo(wound.wX[i], wound.wY[i], midpoint(wound.wX[i], wound.wX[i+1]), midpoint(wound.wY[i], wound.wY[i+1]));
+      }
+      X.stroke();
+      X.restore();
+    }
+    function drawTail(X){
+      const nFree = Math.min(freeCount, TOTAL);
+      if (nFree<=1) return;
+      X.lineCap='round'; X.lineJoin='round'; X.strokeStyle='#d43375'; X.lineWidth=3;
+
+      const mX=new Array(nFree-1), mY=new Array(nFree-1);
+      for (let i=0;i<nFree-1;i++){
+        const A=sim.p[ropeIdx[i]], B=sim.p[ropeIdx[i+1]];
+        mX[i]=midpoint(A.x,B.x); mY[i]=midpoint(A.y,B.y);
+      }
+
+      X.beginPath();
+      const P0=sim.p[ropeIdx[0]];
+      X.moveTo(P0.x,P0.y);
+      X.quadraticCurveTo(P0.x,P0.y, mX[0],mY[0]);
+      for (let i=1;i<nFree-1;i++){
+        const Pi=sim.p[ropeIdx[i]];
+        X.quadraticCurveTo(Pi.x,Pi.y, mX[i],mY[i]);
+      }
+
+      if (nFree < TOTAL){
+        const bA = worldAnchor(freeCount, sim.p[ball.pi].x, sim.p[ball.pi].y, 0);
+        const Pn_1=sim.p[ropeIdx[nFree-1]];
+        X.quadraticCurveTo(sim.p[ropeIdx[nFree]].x, sim.p[ropeIdx[nFree]].y, midpoint(Pn_1.x, bA.x), midpoint(Pn_1.y, bA.y));
+        X.quadraticCurveTo(bA.x,bA.y, bA.x,bA.y);
+      }
+      X.stroke();
+    }
+
+    // ==== Main loop ====
     let pStep = performance.now();
     function step(now){
-      const dt = clamp((now - pStep) / 1000, 0, 0.033);
+      const dt = clamp((now - pStep)/1000, 0, 1/60);
       pStep = now;
 
-      // keep rope anchor pinned as disk rotates/moves
-      yarn.rope.free = yarn.freeCount;
-      yarn.updateAnchorPin();
+      const cx = sim.p[ball.pi].x, cy = sim.p[ball.pi].y;
+      const pinIndex = (freeCount<=TOTAL-1) ? ropeIdx[freeCount] : null;
+      const pinPos = (freeCount<=TOTAL-1) ? worldAnchor(freeCount, cx, cy, 0) : null;
 
-      // advance physics
-      phys.step(dt);
+      const ropeRange = [0, Math.max(0, freeCount)];
+      sim.step(dt, ropeRange, ROPE_R, pinIndex, pinPos||{x:0,y:0});
 
-      // metrics
-      const freedLength = SEG * yarn.freeCount * ((TOTAL - 1) / TOTAL) / pxPerM;
+      const freedLength = (SEG * freeCount * ((TOTAL-1)/TOTAL) / pxPerM);
 
-      // --- Render ---
-      X.fillStyle = '#222';
-      X.fillRect(0, 0, world.w, world.h);
+      // Render
+      X.fillStyle='#222'; X.fillRect(0,0,world.w,world.h);
 
-      // floor stripe
-      X.strokeStyle = '#444'; X.lineWidth = 50;
+      X.strokeStyle='#444'; X.lineWidth=50;
       X.beginPath(); X.moveTo(0, world.h-1); X.lineTo(world.w, world.h-1); X.stroke();
 
-      // draw static bodies
-      // platform (segment)
-      X.strokeStyle='#666'; X.lineWidth=platform.r / 2; X.beginPath();
-      X.moveTo(platform.shape.x1, platform.shape.y1);
-      X.lineTo(platform.shape.x2, platform.shape.y2);
-      X.stroke();
-      // peg (circle)
-      X.fillStyle='#666'; X.beginPath();
-      X.arc(peg.pos.x, peg.pos.y, peg.shape.r, 0, Math.PI*2); X.fill();
+      X.strokeStyle='#666'; X.lineWidth=platform.r; X.lineCap='round';
+      X.beginPath(); X.moveTo(platform.x1, platform.y1); X.lineTo(platform.x2, platform.y2); X.stroke();
 
-      // draw yarn bundle + rope
-      yarn.draw(X);
+      X.fillStyle='#666'; X.beginPath(); X.arc(peg.x, peg.y, peg.r, 0, Math.PI*2); X.fill();
 
-      // HUD
+      drawWoundPath(X, sim.p[ball.pi].x, sim.p[ball.pi].y);
+      drawTail(X);
+
       X.fillStyle='#fff';
       X.font='14px system-ui,sans-serif';
       X.fillText('yarn: ' + freedLength.toFixed(1) + ' m', 12, 22);
 
       requestAnimationFrame(step);
     }
+
+    // Build & start
+    resize();
     requestAnimationFrame(step);
   });
 </script>
