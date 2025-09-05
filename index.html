@@ -1,6 +1,5 @@
-<!-- TODO 1. Disable collisions between yarn ball and yarn tail -->
-<!-- TODO 2. Need to optimize so it runs 1000 node rope easily -->
-<!-- TODO 3. Add collisions with static bodies -->
+<!-- TODO 2. Add collisions with static bodies -->
+<!-- TODO 3. Need to optimize so it runs 1000 node rope easily -->
 <!-- TODO 4. Fix yarn length reporting so it caps out at full length (not full length -1 seg length) -->
 
 <script>
@@ -491,7 +490,7 @@
    // peg
    X.fillStyle = '#666'; X.beginPath(); X.arc(toPxX(peg.x), toPxY(peg.y), toPxLen(peg.r), 0, Math.PI * 2); X.fill();
    // ball
-   X.fillStyle = '#fff'; X.beginPath(); X.arc(toPxX(ball.x), toPxY(ball.y), toPxLen(ball.r), 0, Math.PI * 2); X.fill();
+   X.fillStyle = '#ffffff00'; X.beginPath(); X.arc(toPxX(ball.x), toPxY(ball.y), toPxLen(ball.r), 0, Math.PI * 2); X.fill();
    // HUD
    X.fillStyle = '#fff'; X.font = '14px system-ui,sans-serif';
    const freedLength_m = segLen * freeCount * ((N - 1) / N);
