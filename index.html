@@ -100,9 +100,9 @@
     T: []   // tethers (inequality)
    };
 
-   function add(x_m, y_m, mass_kg = 1, radius_m = 0) {
+   function add(x_m, y_m, mass_kg = 1, radius_m = 0, col_mask=7) {
     const w = mass_kg > 0 ? 1 / mass_kg : 0;
-    const p = { x: x_m, y: y_m, px: x_m, py: y_m, vx: 0, vy: 0, w, r: radius_m };
+    const p = { x: x_m, y: y_m, px: x_m, py: y_m, vx: 0, vy: 0, w, r: radius_m, col_mask: col_mask };
     W.P.push(p);
     return p;
    }
@@ -199,6 +199,7 @@
         const a = P[i]; if (!a.r) continue;
         for (let j = i + 1; j < P.length; j++) {
          const b = P[j]; if (!b.r) continue;
+         if ((a.col_mask & b.col_mask) === 0) continue;
          let dx = b.x - a.x, dy = b.y - a.y;
          let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
          const rs = (a.r || 0) + (b.r || 0);
@@ -300,10 +301,10 @@
   const start = TUNE.DEMO.ROPE_START_M;
   const segLen = TUNE.DEMO.ROPE_SEG_LEN_M;
   const rope = [];
-  let prev = sim.add(start.x, start.y, 0, TUNE.DEMO.ROPE_NODE_RADIUS_M); // pinned
+  let prev = sim.add(start.x, start.y, 0, TUNE.DEMO.ROPE_NODE_RADIUS_M, 6); // pinned
   rope.push(prev);
   for (let i = 1; i < N; i++) {
-   const p = sim.add(start.x + i * segLen, start.y, TUNE.DEMO.ROPE_NODE_MASS_KG, TUNE.DEMO.ROPE_NODE_RADIUS_M);
+   const p = sim.add(start.x + i * segLen, start.y, TUNE.DEMO.ROPE_NODE_MASS_KG, TUNE.DEMO.ROPE_NODE_RADIUS_M, 6);
    sim.link(prev, p, segLen, sim.stiffnessToCompliance(TUNE.DEMO.ROPE_STIFFNESS_N_PER_M));
    rope.push(p);
    prev = p;
@@ -314,7 +315,8 @@
    TUNE.DEMO.BALL_POS_M.x,
    TUNE.DEMO.BALL_POS_M.y,
    TUNE.DEMO.BALL_MASS_KG,
-   TUNE.DEMO.BALL_RADIUS_M
+   TUNE.DEMO.BALL_RADIUS_M,
+   8
   );
 
   // ========= WOUND PATH (local to ball), peel into free rope =========
