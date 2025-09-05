@@ -11,7 +11,7 @@
   B.appendChild(C);
 
   // ===== Math helpers =====
-  const {min, max, hypot, sin, cos, PI, atan2, random} = Math;
+  const {min, max, hypot, sqrt, sin, cos, PI, random} = Math;
   const clamp = (v, a, b) => max(a, min(b, v));
 
   // ===== World / DPI =====
@@ -245,54 +245,44 @@
    const start = TUNE.DEMO.ROPE_START_M;
    const segLen = TUNE.DEMO.ROPE_SEG_LEN_M;
    const rope = [];
-   let prev = sim.add(start.x, start.y, 0, TUNE.DEMO.ROPE_NODE_RADIUS_M, 6); // pinned static
+   let prev = sim.add(start.x, start.y, 0, TUNE.DEMO.ROPE_NODE_RADIUS_M, 0);
    rope.push(prev);
    for (let i = 1; i < N; i++) {
-    const p = sim.add(start.x + i * segLen, start.y, TUNE.DEMO.ROPE_NODE_MASS_KG, TUNE.DEMO.ROPE_NODE_RADIUS_M, 6);
+    const p = sim.add(start.x + i * segLen, start.y, TUNE.DEMO.ROPE_NODE_MASS_KG, TUNE.DEMO.ROPE_NODE_RADIUS_M, 0);
     sim.link(prev, p, segLen, sim.stiffnessToCompliance(TUNE.DEMO.ROPE_STIFFNESS_N_PER_M));
     rope.push(p);
     prev = p;
    }
-   const ball = sim.add(TUNE.DEMO.BALL_POS_M.x, TUNE.DEMO.BALL_POS_M.y, TUNE.DEMO.BALL_MASS_KG, TUNE.DEMO.BALL_RADIUS_M, 8);
+   const ball = sim.add(TUNE.DEMO.BALL_POS_M.x, TUNE.DEMO.BALL_POS_M.y, TUNE.DEMO.BALL_MASS_KG, TUNE.DEMO.BALL_RADIUS_M, 1);
 
    // wound path (local to ball)
    function buildWoundPath(total, segLen_m, R_m) {
     const wX = new Array(total).fill(0), wY = new Array(total).fill(0);
-    const inner = Math.max(0.001, R_m - 0.06), outer = R_m;
+    const inner = 0, outer = R_m;
     const locals = [];
     const pushFar = p => {
      if (!locals.length) { locals.push(p); return; }
      const q = locals[locals.length - 1], d = hypot(p.x - q.x, p.y - q.y);
-     if (d < segLen_m) {
-      const nx = (p.x - q.x) / (d || 1), ny = (p.y - q.y) / (d || 1);
-      locals.push({ x: q.x + nx * segLen_m, y: q.y + ny * segLen_m });
-     } else locals.push(p);
+     const nx = (p.x - q.x) / (d || 1), ny = (p.y - q.y) / (d || 1);
+     locals.push({ x: q.x + nx * segLen_m, y: q.y + ny * segLen_m });
     };
-    pushFar({ x: inner, y: inner });
-    const layers = [
-     { tilt: -0.35, count: 2, wR: 0.06 * inner, wT: 0.20 },
-     { tilt:  0.55, count: 2, wR: 0.05 * inner, wT: 0.18 },
-     { tilt:  1.10, count: 2, wR: 0.05 * inner, wT: 0.15 }
-    ];
-    for (const L of layers) {
-     for (let k = 0; k < L.count; k++) {
-      const phase = (k + .5) / L.count * PI * .7, ct = cos(L.tilt + phase), st = sin(L.tilt + phase);
-      for (let a = -PI * .98; a <= PI * .98; a += PI) {
-       const ca = cos(a), sa = sin(a);
-       let x = inner * (ca * ct - sa * st), y = inner * (ca * st + sa * ct);
-       const t = (a + PI) / (2 * PI), inward = .25 + .75 * sin(t * PI), r = inner + 2 * L.wR * inward;
-       const len = hypot(x, y) || 1; x *= r / len; y *= r / len;
-       const jitter = (sin((a + phase) * 23.71) * .5 + .5) * L.wT, ang = atan2(y, x) + jitter * .15;
-       pushFar({ x: r * cos(ang), y: r * sin(ang) });
-      }
-     }
-    }
-    while (locals.length < total) {
-     const a = random() * PI * 2, rr = outer + (inner - outer) * random();
-     pushFar({ x: rr * cos(a), y: rr * sin(a) });
+    pushFar({ x: outer, y: outer });
+    const limit = total - locals.length;
+    let dir = 1;
+    for (let i = 0; i < limit; i++) {
+     if (random() < 0.2) { dir *= -1; }
+     const angle = dir * i * (segLen_m / (2 * PI * outer)) * 2 * PI;
+     const r = (outer - inner) * sqrt(1 - i / limit) + inner;
+     const p = { x: r * cos(angle), y: r * sin(angle)};
+     pushFar(p);
     }
     for (let i = 0; i < total; i++) { const p = locals[i] || locals[locals.length - 1]; wX[i] = p.x; wY[i] = p.y; }
-    return { wX, wY };
+
+    const wR = new Array(total).fill(0);
+    for (let i = 1; i < total; i++) {
+     wR[i] = hypot(wX[i], wY[i]);
+    }
+    return { wX, wY, wR };
    }
    const woundLocal = buildWoundPath(N, segLen, TUNE.DEMO.BALL_RADIUS_M);
    let freeCount = 0;
@@ -307,9 +297,7 @@
    // initialize: place rope onto wound path, make all static
    (function layoutInitial() {
     for (let i = 0; i < N; i++) {
-     const a = worldAnchor(i, ball.x, ball.y, 0);
      const p = rope[i];
-     p.x = p.px = a.x; p.y = p.py = a.y; p.vx = p.vy = 0;
      p.w = 0; // static while on spool
     }
     rope[0].w = 0;
@@ -322,11 +310,15 @@
      const p = rope[idx];
      p.w = 1 / TUNE.DEMO.ROPE_NODE_MASS_KG;          // make dynamic
      p.vx = ball.vx; p.vy = ball.vy;                 // inherit ball velocity
+     p.col_mask = 1;
      freeCount++;
     }
-    // keep the next node pinned (static) to the wound path
     if (freeCount < N) {
-     rope[freeCount].w = 0;
+     rope[freeCount].w = 0; // keep the next node pinned (static) to the wound path
+     let totalRad = 0; // resize ball to size of yarn
+     const limit = min(max(25, 0.1 * (N - freeCount)), N - freeCount);
+     for (let i = 0; i < limit; i++) { totalRad += woundLocal.wR[i + freeCount]; }
+     ball.r = max(0.05, totalRad / limit);
     }
    }
 
@@ -431,6 +423,16 @@
     X.fillStyle = '#666';
     X.beginPath(); X.arc(pegPx[0], pegPx[1], toLen(peg.r), 0, Math.PI * 2); X.fill();
 
+    // draw dotted outline of ball
+    const ballPx = toPx(bounds, ball.x, ball.y);
+    X.strokeStyle = 'rgba(255,255,255)';
+    X.lineWidth = 1;
+    X.setLineDash([4, 4]);
+    X.beginPath();
+    X.arc(ballPx[0], ballPx[1], toLen(ball.r), 0, Math.PI * 2);
+    X.stroke();
+    X.setLineDash([]);
+
     // HUD
     X.fillStyle = '#fff'; X.font = '14px system-ui,sans-serif';
     X.fillText('yarn: ' + hud.freedLength_m.toFixed(1) + ' m', 12, 22);
@@ -442,7 +444,6 @@
     const n = tail.length + wound.length;
     if (n < 2) return;
 
-    // midpoints
     const m = new Array(2 * n - 1);
     for (let i = 0; i < m.length; i = i + 2) {
      let curArr, currIdx, nextArr, nextIdx;
@@ -454,6 +455,7 @@
      if (nextIdx >= nextArr.length) break;
      m[i + 1] = { x: mp(curArr[currIdx].x, nextArr[nextIdx].x), y: mp(curArr[currIdx].y, nextArr[nextIdx].y) };
     }
+    X.restore();
     X.lineCap = 'round'; X.lineJoin = 'round'; X.strokeStyle = cfg.linkStroke; X.lineWidth = cfg.linkWidth;
     X.beginPath();
     const start = toPx(bounds, m[0].x, m[0].y);
@@ -464,6 +466,7 @@
      X.quadraticCurveTo(ctrl[0], ctrl[1], knot[0], knot[1]);
     }
     X.stroke();
+    X.restore();
    }
 
    function draw(state) {
