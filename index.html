@@ -1,397 +1,543 @@
-<div id="app"></div>
+<!-- TODO 1. Disable collisions between yarn ball and yarn tail -->
+<!-- TODO 2. Need to optimize so it runs 1000 node rope easily -->
+<!-- TODO 3. Add collisions with static bodies -->
+<!-- TODO 4. Fix yarn length reporting so it caps out at full length (not full length -1 seg length) -->
+
 <script>
-  let signal = null;
+  document.addEventListener('DOMContentLoaded', () => {
+    // ===== Canvas bootstrap (from the first script's style) =====
+    const $ = document, W = window, B = $.body, C = $.createElement('canvas'), X = C.getContext('2d');
+    (document.getElementById('content') || B).innerHTML = '';
+    Object.assign(B.style, {margin: 0, overflow: 'hidden'});
+    Object.assign(C.style, {display: 'block', touchAction: 'none'});
+    B.appendChild(C);
 
-  // ========================================
-  // CONFIG: TUNABLE
-  // ========================================
-  const TUNE = {
-    SIM: {
-      DT_S:                1/60,
-      SUBSTEPS:            1,
-      ITERS:               18,              // a few more helps the chain
-      GRAVITY_MPS2:        [0, 9.81],
-      DRAG:                0.01,
-      BOUNDS_M:            [0, 0, 8, 6],
-      COLLIDE_CIRCLES:     true,
-      CONTACT_COMPLIANCE_M_PER_N: 0
-    },
-    RENDER: {
-      WIDTH_PX:            800,
-      HEIGHT_PX:           600,
-      PIXELS_PER_METER:    100,
-      BG:                  '#0b0d12',
-      LINK_STROKE:         '#6aa9ff',
-      LINK_WIDTH_PX:       2,
-      PARTICLE_FILL:       '#ffd166',
-      PARTICLE_STROKE:     '#222',
-      PARTICLE_STROKE_W:   1,
-      PIN_FILL:            '#ff6b6b',
-      SHOW_BOUNDS:         true,
-      BOUNDS_STROKE:       'rgba(255,255,255,.2)',
-      DEFAULT_PARTICLE_R_M:0.05
-    },
-    DEMO: {
-      ROPE_COUNT:          40,
-      ROPE_START_M:        {x: 4, y: 0.8},
-      ROPE_SEG_LEN_M:      0.10,
-      ROPE_NODE_MASS_KG:   0.01,
-      ROPE_NODE_RADIUS_M:  0.05,
-      ROPE_STIFFNESS_N_PER_M: 1e8,
+    // ===== Math helpers =====
+    const {min, max, hypot, sin, cos, PI, atan2, random} = Math;
+    const clamp = (v, a, b) => max(a, min(b, v));
 
-      BALL_POS_M:          {x: 6, y: 4.3},
-      BALL_RADIUS_M:       0.30,
-      BALL_MASS_KG:        2,
+    // ===== World / DPI =====
+    const DPR = min(2, W.devicePixelRatio || 1);
+    function fitCanvasToWindow() {
+      const w = W.innerWidth || $.documentElement.clientWidth;
+      const h = W.innerHeight || $.documentElement.clientHeight;
+      Object.assign(C.style, {width: w + 'px', height: h + 'px'});
+      C.width = (w * DPR) | 0; C.height = (h * DPR) | 0;
+      X.setTransform(DPR, 0, 0, DPR, 0, 0);
 
-      MAX_FRAME_DT_S:      1/30,
-      CLICK_POKE_N_PER_M:  300
+      // Adjust sim bounds to fill the canvas in world meters
+      const S = TUNE.RENDER.PIXELS_PER_METER;
+      if (typeof sim !== 'undefined' && sim && Array.isArray(sim.bounds)) {
+        sim.bounds = [0, 0, w / S, h / S];
+      }
     }
-  };
 
-  // ========================================
-  // CONFIG: NON_TUNABLE
-  // ========================================
-  const INTERNAL = {
-    EPS_M:         1e-9,
-    MIN_VIEWBOX_W: 1,
-    MIN_VIEWBOX_H: 1,
-    LAMBDA_DECAY:      1.0   // set <1 to bleed warmstart if needed
-  };
+    W.addEventListener('resize', fitCanvasToWindow);
 
-  // =========================
-  // XPBD (SI Units, meters)
-  // =========================
-  function XPBD(opt = {}) {
-    const W = {
-      dt: opt.dt ?? TUNE.SIM.DT_S,
-      substeps: opt.substeps ?? TUNE.SIM.SUBSTEPS,
-      iters: opt.iters ?? TUNE.SIM.ITERS,
-      g: opt.g ?? TUNE.SIM.GRAVITY_MPS2.slice(),
-      drag: opt.drag ?? TUNE.SIM.DRAG,
-      bounds: opt.bounds ?? (TUNE.SIM.BOUNDS_M && TUNE.SIM.BOUNDS_M.slice()),
-      contactCompliance: opt.contactCompliance ?? TUNE.SIM.CONTACT_COMPLIANCE_M_PER_N,
-      collide: opt.collide ?? TUNE.SIM.COLLIDE_CIRCLES,
-      P: [],  // particles
-      C: [],  // distance constraints (equality)
-      T: []   // tethers (inequality)
+    // ========================================
+    // CONFIG: TUNABLE (ported from second script)
+    // ========================================
+    const TUNE = {
+      SIM: {
+        DT_S:                1/60,
+        SUBSTEPS:            1,
+        ITERS:               18,
+        GRAVITY_MPS2:        [0, 9.81],
+        DRAG:                0.01,
+        BOUNDS_M:            [0, 0, 8, 6],     // meters
+        COLLIDE_CIRCLES:     true,
+        CONTACT_COMPLIANCE_M_PER_N: 0
+      },
+      RENDER: {
+        BG:                  '#0b0d12',
+        LINK_STROKE:         '#6aa9ff',
+        LINK_WIDTH_PX:       2,
+        PARTICLE_FILL:       '#ffd166',
+        PARTICLE_STROKE:     '#222',
+        PARTICLE_STROKE_W:   1,
+        PIN_FILL:            '#ff6b6b',
+        SHOW_BOUNDS:         false,
+        DEFAULT_PARTICLE_R_M:0.05,
+        PIXELS_PER_METER:    130              // canvas scale (tweak to taste)
+      },
+      DEMO: {
+        ROPE_COUNT:          200,
+        ROPE_START_M:        {x: 4, y: 0.8},
+        ROPE_SEG_LEN_M:      0.10,
+        ROPE_NODE_MASS_KG:   0.01,
+        ROPE_NODE_RADIUS_M:  0.025,
+        ROPE_STIFFNESS_N_PER_M: 1e8,
+
+        BALL_POS_M:          {x: 6, y: 4.3},
+        BALL_RADIUS_M:       0.30,
+        BALL_MASS_KG:        2,
+
+        MAX_FRAME_DT_S:      1/30,
+        CLICK_POKE_N_PER_M:  300
+      }
     };
 
-    // --- Particles ---
-    function add(x_m, y_m, mass_kg = 1, radius_m = 0) {
-      const w = mass_kg > 0 ? 1 / mass_kg : 0;
-      const p = { x: x_m, y: y_m, px: x_m, py: y_m, vx: 0, vy: 0, w, r: radius_m };
-      W.P.push(p);
-      return p;
-    }
-    function setStatic(p, yes = true) { p.w = yes ? 0 : (p.w || 1); }
+    const INTERNAL = {
+      EPS_M: 1e-9,
+      LAMBDA_DECAY: 1.0
+    };
 
-    // --- Distance (XPBD, equality) ---
-    function link(a, b, rest_m = null, compliance_m_per_N = 0) {
-      if (rest_m == null) { const dx = b.x - a.x, dy = b.y - a.y; rest_m = Math.hypot(dx, dy); }
-      const c = { a, b, rest: rest_m, comp: compliance_m_per_N, lam: 0 };
-      W.C.push(c);
-      return c;
-    }
+    // =========================
+    // XPBD (from second script, verbatim logic)
+    // =========================
+    function XPBD(opt = {}) {
+      const W = {
+        dt: opt.dt ?? TUNE.SIM.DT_S,
+        substeps: opt.substeps ?? TUNE.SIM.SUBSTEPS,
+        iters: opt.iters ?? TUNE.SIM.ITERS,
+        g: opt.g ?? TUNE.SIM.GRAVITY_MPS2.slice(),
+        drag: opt.drag ?? TUNE.SIM.DRAG,
+        bounds: opt.bounds ?? (TUNE.SIM.BOUNDS_M && TUNE.SIM.BOUNDS_M.slice()),
+        contactCompliance: opt.contactCompliance ?? TUNE.SIM.CONTACT_COMPLIANCE_M_PER_N,
+        collide: opt.collide ?? TUNE.SIM.COLLIDE_CIRCLES,
+        P: [],  // particles
+        C: [],  // distance constraints (equality)
+        T: []   // tethers (inequality)
+      };
 
-    // --- Forces (N) ---
-    function addForce(p, Fx_N, Fy_N) {
-      if (!p.w) return p;
-      p.vx += (Fx_N * p.w) * W.dt;
-      p.vy += (Fy_N * p.w) * W.dt;
-      return p;
-    }
+      function add(x_m, y_m, mass_kg = 1, radius_m = 0) {
+        const w = mass_kg > 0 ? 1 / mass_kg : 0;
+        const p = { x: x_m, y: y_m, px: x_m, py: y_m, vx: 0, vy: 0, w, r: radius_m };
+        W.P.push(p);
+        return p;
+      }
+      function setStatic(p, yes = true) { p.w = yes ? 0 : (p.w || 1); }
+      function link(a, b, rest_m = null, compliance_m_per_N = 0) {
+        if (rest_m == null) { const dx = b.x - a.x, dy = b.y - a.y; rest_m = Math.hypot(dx, dy); }
+        const c = { a, b, rest: rest_m, comp: compliance_m_per_N, lam: 0 };
+        W.C.push(c); return c;
+      }
+      function addForce(p, Fx_N, Fy_N) {
+        if (!p.w) return p;
+        p.vx += (Fx_N * p.w) * W.dt;
+        p.vy += (Fy_N * p.w) * W.dt;
+        return p;
+      }
 
-    // --- Solver step ---
-    function step(dt = W.dt) {
-      const P = W.P, C = W.C, T = W.T, g = W.g, drag = W.drag, sub = W.substeps, it = W.iters;
-      const hasBounds = !!W.bounds, B = W.bounds;
-      const doCollide = !!W.collide, cComp = W.contactCompliance;
+      function step(dt = W.dt) {
+        const P = W.P, C = W.C, T = W.T, g = W.g, drag = W.drag, sub = W.substeps, it = W.iters;
+        const hasBounds = !!W.bounds, B = W.bounds;
+        const doCollide = !!W.collide, cComp = W.contactCompliance;
 
-      const sdt = dt / sub;
-      const invDrag = 1 / (1 + drag);
-      const alphaScale = sdt * sdt;
+        const sdt = dt / sub;
+        const invDrag = 1 / (1 + drag);
+        const alphaScale = sdt * sdt;
 
-      for (let s = 0; s < sub; s++) {
-        // integrate
-        for (let i = 0; i < P.length; i++) {
-          const p = P[i];
-          p.px = p.x; p.py = p.y;
-          if (!p.w) continue;
-          p.vx += g[0] * sdt; p.vy += g[1] * sdt;
-          p.vx *= invDrag;    p.vy *= invDrag;
-          p.x += p.vx * sdt;  p.y += p.vy * sdt;
-        }
-
-        // GS iterations
-        for (let k = 0; k < it; k++) {
-          // Tethers (inequality: ||a-b|| <= max). Define C = max - d.
-          for (let i = 0; i < T.length; i++) {
-            const t = T[i], a = t.a, b = t.b;
-            let dx = a.x - b.x, dy = a.y - b.y;
-            let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
-            const Cval = t.max - d;                    // active when Cval < 0 (overstretched)
-            if (Cval >= 0) { t.lam = 0; continue; }    // inactive: reset λ (KKT)
-            const nx = dx / d, ny = dy / d;
-            const wsum = a.w + b.w; if (wsum === 0) continue;
-            // XPBD with damping: α = c/dt^2 + d/dt
-            const alpha = (t.comp || 0) / alphaScale;
-            const oldLam = Math.max(0, t.lam) * INTERNAL.LAMBDA_DECAY;
-            let dlam = (-Cval - alpha * oldLam) / (wsum + alpha);
-            let newLam = oldLam + dlam;
-            if (newLam < 0) { dlam = -oldLam; newLam = 0; } // project λ ≥ 0
-            const px = dlam * nx, py = dlam * ny;
-            if (a.w) { a.x -= px * a.w; a.y -= py * a.w; }
-            if (b.w) { b.x += px * b.w; b.y += py * b.w; }
-            t.lam = newLam;
+        for (let s = 0; s < sub; s++) {
+          // integrate
+          for (let i = 0; i < P.length; i++) {
+            const p = P[i];
+            p.px = p.x; p.py = p.y;
+            if (!p.w) continue;
+            p.vx += g[0] * sdt; p.vy += g[1] * sdt;
+            p.vx *= invDrag;    p.vy *= invDrag;
+            p.x += p.vx * sdt;  p.y += p.vy * sdt;
           }
 
-          // Distance constraints
-          for (let i = 0; i < C.length; i++) {
-            const c = C[i], a = c.a, b = c.b;
-            let dx = b.x - a.x, dy = b.y - a.y;
-            let d = Math.hypot(dx, dy);
-            if (d < INTERNAL.EPS_M) continue;
-            const nx = dx / d, ny = dy / d;
-            const Cval = d - c.rest;
-            const wsum = a.w + b.w;
-            if (wsum === 0) { c.lam = 0; continue; }
-            const alpha = (c.comp || 0) / alphaScale;
-            const oldLam = c.lam * INTERNAL.LAMBDA_DECAY;
-            const dlam = (-Cval - alpha * oldLam) / (wsum + alpha);
-            c.lam = oldLam + dlam;
-            const px = dlam * nx, py = dlam * ny;
-            if (a.w) { a.x -= px * a.w; a.y -= py * a.w; }
-            if (b.w) { b.x += px * b.w; b.y += py * b.w; }
-          }
-
-          // Bounds (AABB)
-          if (hasBounds) {
-            const [minx, miny, maxx, maxy] = B;
-            for (let i = 0; i < P.length; i++) {
-              const p = P[i], r = p.r || 0;
-              if (p.x < minx + r) p.x = minx + r;
-              if (p.x > maxx - r) p.x = maxx - r;
-              if (p.y < miny + r) p.y = miny + r;
-              if (p.y > maxy - r) p.y = maxy - r;
+          // GS iterations
+          for (let k = 0; k < it; k++) {
+            // Tethers (inequality)
+            for (let i = 0; i < T.length; i++) {
+              const t = T[i], a = t.a, b = t.b;
+              let dx = a.x - b.x, dy = a.y - b.y;
+              let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
+              const Cval = t.max - d;
+              if (Cval >= 0) { t.lam = 0; continue; }
+              const nx = dx / d, ny = dy / d;
+              const wsum = a.w + b.w; if (wsum === 0) continue;
+              const alpha = (t.comp || 0) / alphaScale;
+              const oldLam = Math.max(0, t.lam) * INTERNAL.LAMBDA_DECAY;
+              let dlam = (-Cval - alpha * oldLam) / (wsum + alpha);
+              let newLam = oldLam + dlam;
+              if (newLam < 0) { dlam = -oldLam; newLam = 0; }
+              const px = dlam * nx, py = dlam * ny;
+              if (a.w) { a.x -= px * a.w; a.y -= py * a.w; }
+              if (b.w) { b.x += px * b.w; b.y += py * b.w; }
+              t.lam = newLam;
             }
-          }
 
-          // Optional circle–circle contacts
-          if (doCollide) {
-            const alphaC = (cComp || 0) / alphaScale;
-            for (let i = 0; i < P.length; i++) {
-              const a = P[i]; if (!a.r) continue;
-              for (let j = i + 1; j < P.length; j++) {
-                const b = P[j]; if (!b.r) continue;
-                let dx = b.x - a.x, dy = b.y - a.y;
-                let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
-                const rs = (a.r || 0) + (b.r || 0);
-                const Cval = d - rs; if (Cval >= 0) continue;
-                const nx = dx / d, ny = dy / d;
-                const wsum = a.w + b.w; if (wsum === 0) continue;
-                const dlam = (-Cval) / (wsum + alphaC);
-                const px = dlam * nx, py = dlam * ny;
-                if (a.w) { a.x -= px * a.w; a.y -= py * a.w; }
-                if (b.w) { b.x += px * b.w; b.y += py * b.w; }
+            // Distance constraints (equality)
+            for (let i = 0; i < C.length; i++) {
+              const c = C[i], a = c.a, b = c.b;
+              let dx = b.x - a.x, dy = b.y - a.y;
+              let d = Math.hypot(dx, dy);
+              if (d < INTERNAL.EPS_M) continue;
+              const nx = dx / d, ny = dy / d;
+              const Cval = d - c.rest;
+              const wsum = a.w + b.w;
+              if (wsum === 0) { c.lam = 0; continue; }
+              const alpha = (c.comp || 0) / alphaScale;
+              const oldLam = c.lam * INTERNAL.LAMBDA_DECAY;
+              const dlam = (-Cval - alpha * oldLam) / (wsum + alpha);
+              c.lam = oldLam + dlam;
+              const px = dlam * nx, py = dlam * ny;
+              if (a.w) { a.x -= px * a.w; a.y -= py * a.w; }
+              if (b.w) { b.x += px * b.w; b.y += py * b.w; }
+            }
+
+            // Bounds (AABB in meters)
+            if (hasBounds) {
+              const [minx, miny, maxx, maxy] = B;
+              for (let i = 0; i < P.length; i++) {
+                const p = P[i], r = p.r || 0;
+                if (p.x < minx + r) p.x = minx + r;
+                if (p.x > maxx - r) p.x = maxx - r;
+                if (p.y < miny + r) p.y = miny + r;
+                if (p.y > maxy - r) p.y = maxy - r;
+              }
+            }
+
+            // Optional circle–circle contacts
+            if (doCollide) {
+              const alphaC = (cComp || 0) / alphaScale;
+              for (let i = 0; i < P.length; i++) {
+                const a = P[i]; if (!a.r) continue;
+                for (let j = i + 1; j < P.length; j++) {
+                  const b = P[j]; if (!b.r) continue;
+                  let dx = b.x - a.x, dy = b.y - a.y;
+                  let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
+                  const rs = (a.r || 0) + (b.r || 0);
+                  const Cval = d - rs; if (Cval >= 0) continue;
+                  const nx = dx / d, ny = dy / d;
+                  const wsum = a.w + b.w; if (wsum === 0) continue;
+                  const dlam = (-Cval) / (wsum + alphaC);
+                  const px = dlam * nx, py = dlam * ny;
+                  if (a.w) { a.x -= px * a.w; a.y -= py * a.w; }
+                  if (b.w) { b.x += px * b.w; b.y += py * b.w; }
+                }
               }
             }
           }
+
+          // velocity update
+          for (let i = 0; i < P.length; i++) {
+            const p = P[i];
+            p.vx = (p.x - p.px) / sdt;
+            p.vy = (p.y - p.py) / sdt;
+          }
         }
+      }
 
-        // velocity update
-        for (let i = 0; i < P.length; i++) {
-          const p = P[i];
-          p.vx = (p.x - p.px) / sdt;
-          p.vy = (p.y - p.py) / sdt;
+      function stiffnessToCompliance(k_N_per_m) { return k_N_per_m > 0 ? 1 / k_N_per_m : 0; }
+
+      return {
+        P: W.P, C: W.C, T: W.T,
+        get dt() { return W.dt; }, set dt(v) { W.dt = v; },
+        get iters() { return W.iters; }, set iters(v) { W.iters = v | 0; },
+        get substeps() { return W.substeps; }, set substeps(v) { W.substeps = v | 0; },
+        get gravity() { return W.g; }, set gravity(g) { W.g = g; },
+        get bounds() { return W.bounds; }, set bounds(b) { W.bounds = b; },
+        get collide() { return W.collide; }, set collide(v) { W.collide = !!v; },
+        add, setStatic, link, addForce, step, stiffnessToCompliance
+      };
+    }
+
+    // ==================================
+    // Canvas Renderer (drop-in for SVGRenderer)
+    // ==================================
+    function CanvasRenderer(sim, opt = {}) {
+      const cfg = {
+        pixelsPerMeter: opt.pixelsPerMeter ?? TUNE.RENDER.PIXELS_PER_METER,
+        bg: opt.bg || TUNE.RENDER.BG,
+        linkStroke: opt.linkStroke || TUNE.RENDER.LINK_STROKE,
+        linkWidth: opt.linkWidth ?? TUNE.RENDER.LINK_WIDTH_PX,
+        particleFill: opt.particleFill || TUNE.RENDER.PARTICLE_FILL,
+        particleStroke: opt.particleStroke || TUNE.RENDER.PARTICLE_STROKE,
+        particleWidth: opt.particleWidth ?? TUNE.RENDER.PARTICLE_STROKE_W,
+        pinFill: opt.pinFill || TUNE.RENDER.PIN_FILL,
+        showBounds: opt.showBounds ?? TUNE.RENDER.SHOW_BOUNDS
+      };
+      const S = () => cfg.pixelsPerMeter;
+      const origin = () => sim.bounds ? [sim.bounds[0], sim.bounds[1]] : [0, 0];
+      const toPxX = xm => (xm - origin()[0]) * S();
+      const toPxY = ym => (ym - origin()[1]) * S();
+      const toPxLen = lm => lm * S();
+
+      function drawBounds() {
+        if (!cfg.showBounds || !sim.bounds) return;
+        const [minx, miny, maxx, maxy] = sim.bounds;
+        X.strokeStyle = 'rgba(255,255,255,.2)';
+        X.lineWidth = 1;
+        X.strokeRect(toPxX(minx), toPxY(miny), toPxLen(maxx - minx), toPxLen(maxy - miny));
+      }
+
+      function clear() { X.fillStyle = cfg.bg; X.fillRect(0, 0, C.clientWidth, C.clientHeight); }
+
+      // expose utilities; drawing is handled outside to match first-script visuals
+      function draw() { clear(); drawBounds(); }
+
+      function screenToMeters(clientX, clientY) {
+        const rect = C.getBoundingClientRect();
+        const lx = (clientX - rect.left) / DPR; // canvas pixels
+        const ly = (clientY - rect.top) / DPR;
+        const [ox, oy] = origin();
+        return { x: ox + lx / S(), y: oy + ly / S() };
+      }
+
+      return { draw, screenToMeters };
+    }
+
+    // =====================
+    // Build sim + scene
+    // =====================
+    const sim = XPBD({
+      dt: TUNE.SIM.DT_S,
+      iters: TUNE.SIM.ITERS,
+      substeps: TUNE.SIM.SUBSTEPS,
+      g: TUNE.SIM.GRAVITY_MPS2,
+      bounds: TUNE.SIM.BOUNDS_M,
+      collide: TUNE.SIM.COLLIDE_CIRCLES,
+      contactCompliance: TUNE.SIM.CONTACT_COMPLIANCE_M_PER_N
+    });
+
+    // Rope: first node pinned (static) like the SVG demo
+    const N = TUNE.DEMO.ROPE_COUNT;
+    const start = TUNE.DEMO.ROPE_START_M;
+    const segLen = TUNE.DEMO.ROPE_SEG_LEN_M;
+    const rope = [];
+    let prev = sim.add(start.x, start.y, 0, TUNE.DEMO.ROPE_NODE_RADIUS_M); // pinned
+    rope.push(prev);
+    for (let i = 1; i < N; i++) {
+      const p = sim.add(start.x + i * segLen, start.y, TUNE.DEMO.ROPE_NODE_MASS_KG, TUNE.DEMO.ROPE_NODE_RADIUS_M);
+      sim.link(prev, p, segLen, sim.stiffnessToCompliance(TUNE.DEMO.ROPE_STIFFNESS_N_PER_M));
+      rope.push(p);
+      prev = p;
+    }
+
+    // A ball (dynamic circle)
+    const ball = sim.add(
+      TUNE.DEMO.BALL_POS_M.x,
+      TUNE.DEMO.BALL_POS_M.y,
+      TUNE.DEMO.BALL_MASS_KG,
+      TUNE.DEMO.BALL_RADIUS_M
+    );
+
+    // ========= WOUND PATH (local to ball), peel into free rope =========
+    function buildWoundPath(total, segLen_m, R_m) {
+      const wX = new Array(total).fill(0), wY = new Array(total).fill(0);
+      const inner = Math.max(0.001, R_m - 0.06), outer = R_m; // meters; small inner thickness
+      const locals = [];
+      const pushFar = p => {
+        if (!locals.length) { locals.push(p); return; }
+        const q = locals[locals.length - 1], d = hypot(p.x - q.x, p.y - q.y);
+        if (d < segLen_m) {
+          const nx = (p.x - q.x) / (d || 1), ny = (p.y - q.y) / (d || 1);
+          locals.push({ x: q.x + nx * segLen_m, y: q.y + ny * segLen_m });
+        } else locals.push(p);
+      };
+      pushFar({ x: inner, y: inner });
+      const layers = [
+        { tilt: -0.35, count: 2, wR: 0.06 * inner, wT: 0.20 },
+        { tilt:  0.55, count: 2, wR: 0.05 * inner, wT: 0.18 },
+        { tilt:  1.10, count: 2, wR: 0.05 * inner, wT: 0.15 }
+      ];
+      for (const L of layers) {
+        for (let k = 0; k < L.count; k++) {
+          const phase = (k + .5) / L.count * PI * .7, ct = cos(L.tilt + phase), st = sin(L.tilt + phase);
+          for (let a = -PI * .98; a <= PI * .98; a += PI) {
+            const ca = cos(a), sa = sin(a);
+            let x = inner * (ca * ct - sa * st), y = inner * (ca * st + sa * ct);
+            const t = (a + PI) / (2 * PI), inward = .25 + .75 * sin(t * PI), r = inner + 2 * L.wR * inward;
+            const len = hypot(x, y) || 1; x *= r / len; y *= r / len;
+            const jitter = (sin((a + phase) * 23.71) * .5 + .5) * L.wT, ang = atan2(y, x) + jitter * .15;
+            pushFar({ x: r * cos(ang), y: r * sin(ang) });
+          }
         }
       }
-    }
-
-    function stiffnessToCompliance(k_N_per_m) { return k_N_per_m > 0 ? 1 / k_N_per_m : 0; }
-
-    return {
-      P: W.P, C: W.C, T: W.T,
-      get dt() { return W.dt; }, set dt(v) { W.dt = v; },
-      get iters() { return W.iters; }, set iters(v) { W.iters = v | 0; },
-      get substeps() { return W.substeps; }, set substeps(v) { W.substeps = v | 0; },
-      get gravity() { return W.g; }, set gravity(g) { W.g = g; },
-      get bounds() { return W.bounds; }, set bounds(b) { W.bounds = b; },
-      get collide() { return W.collide; }, set collide(v) { W.collide = !!v; },
-      add, setStatic, link, addForce, step, stiffnessToCompliance
-    };
-  }
-
-  // ==================================
-  // Minimal SVG Renderer (meters↔pixels)
-  // ==================================
-  function SVGRenderer(sim, opt = {}) {
-    const cfg = {
-      container: opt.container || document.body,
-      width: opt.width ?? TUNE.RENDER.WIDTH_PX,
-      height: opt.height ?? TUNE.RENDER.HEIGHT_PX,
-      pixelsPerMeter: opt.pixelsPerMeter ?? TUNE.RENDER.PIXELS_PER_METER,
-      bg: opt.bg || TUNE.RENDER.BG,
-      linkStroke: opt.linkStroke || TUNE.RENDER.LINK_STROKE,
-      linkWidth: opt.linkWidth ?? TUNE.RENDER.LINK_WIDTH_PX,
-      particleFill: opt.particleFill || TUNE.RENDER.PARTICLE_FILL,
-      particleStroke: opt.particleStroke || TUNE.RENDER.PARTICLE_STROKE,
-      particleWidth: opt.particleWidth ?? TUNE.RENDER.PARTICLE_STROKE_W,
-      pinFill: opt.pinFill || TUNE.RENDER.PIN_FILL,
-      showBounds: opt.showBounds ?? TUNE.RENDER.SHOW_BOUNDS,
-      defaultRadiusM: opt.defaultRadiusM ?? TUNE.RENDER.DEFAULT_PARTICLE_R_M
-    };
-
-    const S = cfg.pixelsPerMeter;
-    const svgNS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(svgNS, 'svg');
-    svg.setAttribute('width', String(cfg.width));
-    svg.setAttribute('height', String(cfg.height));
-    svg.style.display = 'block';
-    svg.style.background = cfg.bg;
-    svg.setAttribute('viewBox', `0 0 ${cfg.width} ${cfg.height}`);
-
-    const gLinks = document.createElementNS(svgNS, 'g');
-    const gParticles = document.createElementNS(svgNS, 'g');
-    const gOverlay = document.createElementNS(svgNS, 'g');
-    svg.append(gLinks, gParticles, gOverlay);
-    cfg.container.appendChild(svg);
-
-    function origin() {
-      if (!sim.bounds) return [0, 0];
-      const [minx, miny] = sim.bounds;
-      return [minx, miny];
-    }
-    function toPxX(xm) { const [ox] = origin(); return (xm - ox) * S; }
-    function toPxY(ym) { const [, oy] = origin(); return (ym - oy) * S; }
-    function toPxLen(lm) { return lm * S; }
-
-    function toMeters(px, py) {
-      const [ox, oy] = origin();
-      return { x: ox + px / S, y: oy + py / S };
-    }
-
-    function drawBounds() {
-      gOverlay.innerHTML = '';
-      if (!cfg.showBounds || !sim.bounds) return;
-      const [minx, miny, maxx, maxy] = sim.bounds;
-      const w = Math.max(INTERNAL.MIN_VIEWBOX_W, maxx - minx);
-      const h = Math.max(INTERNAL.MIN_VIEWBOX_H, maxy - miny);
-      const r = document.createElementNS(svgNS, 'rect');
-      r.setAttribute('x', String(toPxX(minx)));
-      r.setAttribute('y', String(toPxY(miny)));
-      r.setAttribute('width', String(toPxLen(w)));
-      r.setAttribute('height', String(toPxLen(h)));
-      r.setAttribute('fill', 'none');
-      r.setAttribute('stroke', TUNE.RENDER.BOUNDS_STROKE);
-      r.setAttribute('stroke-width', '1');
-      gOverlay.appendChild(r);
-    }
-
-    function draw() {
-      const C = sim.C, P = sim.P;
-      gLinks.innerHTML = '';
-      for (let i = 0; i < C.length; i++) {
-        const c = C[i], a = c.a, b = c.b;
-        const line = document.createElementNS(svgNS, 'line');
-        line.setAttribute('x1', String(toPxX(a.x))); line.setAttribute('y1', String(toPxY(a.y)));
-        line.setAttribute('x2', String(toPxX(b.x))); line.setAttribute('y2', String(toPxY(b.y)));
-        line.setAttribute('stroke', cfg.linkStroke);
-        line.setAttribute('stroke-width', String(cfg.linkWidth));
-        line.setAttribute('stroke-linecap', 'round');
-        gLinks.appendChild(line);
+      while (locals.length < total) {
+        const a = random() * PI * 2, rr = outer + (inner - outer) * random();
+        pushFar({ x: rr * cos(a), y: rr * sin(a) });
       }
-      gParticles.innerHTML = '';
-      for (let i = 0; i < P.length; i++) {
-        const p = P[i], r_px = toPxLen(p.r || cfg.defaultRadiusM);
-        const cir = document.createElementNS(svgNS, 'circle');
-        cir.setAttribute('cx', String(toPxX(p.x))); cir.setAttribute('cy', String(toPxY(p.y)));
-        cir.setAttribute('r', String(r_px));
-        cir.setAttribute('fill', p.w ? cfg.particleFill : cfg.pinFill);
-        cir.setAttribute('stroke', cfg.particleStroke);
-        cir.setAttribute('stroke-width', String(cfg.particleWidth));
-        gParticles.appendChild(cir);
+      for (let i = 0; i < total; i++) { const p = locals[i] || locals[locals.length - 1]; wX[i] = p.x; wY[i] = p.y; }
+      return { wX, wY };
+    }
+
+    const wound = buildWoundPath(N, segLen, TUNE.DEMO.BALL_RADIUS_M);
+    let freeCount = 0; // how many rope nodes have peeled off
+
+    function worldAnchor(i, cx, cy, ang = 0) {
+      const ca = cos(ang), sa = sin(ang);
+      const wx = cx + (wound.wX[i] * ca - wound.wY[i] * sa);
+      const wy = cy + (wound.wX[i] * sa + wound.wY[i] * ca);
+      return { x: wx, y: wy };
+    }
+
+    function layoutInitial() {
+      // place rope nodes onto wound path stuck to ball
+      for (let i = 0; i < N; i++) {
+        const a = worldAnchor(i, ball.x, ball.y, 0);
+        const p = rope[i];
+        p.x = p.px = a.x; p.y = p.py = a.y; p.vx = p.vy = 0;
+        p.w = 0; // static while on spool
       }
-      drawBounds();
+      rope[0].w = 0; // tip pinned at ball initially
+      freeCount = 0;
+    }
+    layoutInitial();
+
+    function freeSegments(n = 1) {
+      for (let k = 0; k < n && freeCount < N; k++) {
+        const i = freeCount;
+        const p = rope[i];
+        // release this node to be dynamic, inherit ball velocity
+        p.w = 1 / TUNE.DEMO.ROPE_NODE_MASS_KG;
+        p.vx = ball.vx; p.vy = ball.vy;
+        freeCount++;
+      }
+      // keep the next node pinned onto the ball surface
+      if (freeCount < N) {
+        const pin = rope[freeCount];
+        pin.w = 0; // static (pinned)
+      }
     }
 
-    function resize(w, h) {
-      if (w) cfg.width = w;
-      if (h) cfg.height = h;
-      svg.setAttribute('width', String(cfg.width));
-      svg.setAttribute('height', String(cfg.height));
-      svg.setAttribute('viewBox', `0 0 ${cfg.width} ${cfg.height}`);
-      drawBounds();
+    // ====== Scene statics for visuals (meters, derived from bounds) ======
+    const [BX0, BY0, BX1, BY1] = TUNE.SIM.BOUNDS_M;
+    const BW = BX1 - BX0, BH = BY1 - BY0;
+    const platform = { r: 0.12, x1: BX0 + BW * 0.10, y1: BY0 + BH * 0.70, x2: BX0 + BW * 0.70, y2: BY0 + BH * 0.60 };
+    const peg = { r: 0.20, x: BX0 + BW * 0.80, y: BY0 + BH * 0.40 };
+
+    // Renderer (Canvas)
+    const r = CanvasRenderer(sim, {
+      pixelsPerMeter: TUNE.RENDER.PIXELS_PER_METER,
+      bg: '#222',                               // align to first script
+      linkStroke: '#d43375',                    // yarn color
+      linkWidth: 3,
+      particleFill: '#ec71a5',
+      particleStroke: '#222',
+      particleWidth: 1,
+      pinFill: TUNE.RENDER.PIN_FILL,
+      showBounds: false
+    });
+
+    // ====== Drawing helpers that match first-script visuals (in meters) ======
+    const toPxX = xm => (xm - BX0) * TUNE.RENDER.PIXELS_PER_METER;
+    const toPxY = ym => (ym - BY0) * TUNE.RENDER.PIXELS_PER_METER;
+    const toPxLen = lm => lm * TUNE.RENDER.PIXELS_PER_METER;
+
+    function drawWoundPath() {
+      if (freeCount >= N - 1) return;
+      X.save();
+      X.translate(toPxX(ball.x), toPxY(ball.y));
+      X.lineCap = 'round'; X.lineJoin = 'round'; X.strokeStyle = '#d43375'; X.lineWidth = 3;
+      X.beginPath();
+      const i0 = freeCount;
+      let xi = wound.wX[i0], yi = wound.wY[i0];
+      X.moveTo(xi * TUNE.RENDER.PIXELS_PER_METER, yi * TUNE.RENDER.PIXELS_PER_METER);
+      const mp = (a, b) => 0.5 * (a + b);
+      const WPM = TUNE.RENDER.PIXELS_PER_METER;
+      // tiny cusp to start
+      X.quadraticCurveTo(
+        xi * WPM, yi * WPM,
+        mp(xi, wound.wX[i0 + 1] || xi) * WPM, mp(yi, wound.wY[i0 + 1] || yi) * WPM
+      );
+      for (let i = i0 + 1; i <= N - 2; i++) {
+        X.moveTo(mp(wound.wX[i - 1], wound.wX[i]) * WPM, mp(wound.wY[i - 1], wound.wY[i]) * WPM);
+        X.quadraticCurveTo(
+          wound.wX[i] * WPM, wound.wY[i] * WPM,
+          mp(wound.wX[i], wound.wX[i + 1]) * WPM, mp(wound.wY[i], wound.wY[i + 1]) * WPM
+        );
+      }
+      X.stroke();
+      X.restore();
     }
 
-    function screenToMeters(clientX, clientY) {
-      const pt = svg.createSVGPoint();
-      pt.x = clientX; pt.y = clientY;
-      const local = pt.matrixTransform(svg.getScreenCTM().inverse());
-      return toMeters(local.x, local.y);
+    function drawTail() {
+      const nFree = Math.min(freeCount, N);
+      if (nFree <= 1) return;
+      X.lineCap = 'round'; X.lineJoin = 'round'; X.strokeStyle = '#d43375'; X.lineWidth = 3;
+      const mp = (a, b) => 0.5 * (a + b);
+      // midpoints for smooth quadratic chain
+      const mX = new Array(nFree - 1), mY = new Array(nFree - 1);
+      for (let i = 0; i < nFree - 1; i++) {
+        const A = rope[i], B = rope[i + 1];
+        mX[i] = mp(A.x, B.x); mY[i] = mp(A.y, B.y);
+      }
+      X.beginPath();
+      const P0 = rope[0];
+      X.moveTo(toPxX(P0.x), toPxY(P0.y));
+      X.quadraticCurveTo(toPxX(P0.x), toPxY(P0.y), toPxX(mX[0]), toPxY(mY[0]));
+      for (let i = 1; i < nFree - 1; i++) {
+        const Pi = rope[i];
+        X.quadraticCurveTo(toPxX(Pi.x), toPxY(Pi.y), toPxX(mX[i]), toPxY(mY[i]));
+      }
+      // blend toward the next wound point for a tidy join
+      if (nFree < N) {
+        const bA = worldAnchor(freeCount, ball.x, ball.y, 0);
+        const Pn_1 = rope[nFree - 1];
+        X.quadraticCurveTo(
+          toPxX(rope[nFree].x), toPxY(rope[nFree].y),
+          toPxX(mp(Pn_1.x, bA.x)), toPxY(mp(Pn_1.y, bA.y))
+        );
+        X.quadraticCurveTo(toPxX(bA.x), toPxY(bA.y), toPxX(bA.x), toPxY(bA.y));
+      }
+      X.stroke();
     }
 
-    return { svg, draw, resize, config: cfg, screenToMeters };
-  }
+    function drawStaticsAndHUD() {
+      // floor (as a faint line)
+      X.strokeStyle = '#444'; X.lineWidth = 0.05 * TUNE.RENDER.PIXELS_PER_METER;
+      X.beginPath(); X.moveTo(toPxX(BX0), toPxY(BY1 - 0.01)); X.lineTo(toPxX(BX1), toPxY(BY1 - 0.01)); X.stroke();
+      // platform
+      X.strokeStyle = '#666'; X.lineCap = 'round'; X.lineWidth = platform.r * TUNE.RENDER.PIXELS_PER_METER;
+      X.beginPath(); X.moveTo(toPxX(platform.x1), toPxY(platform.y1)); X.lineTo(toPxX(platform.x2), toPxY(platform.y2)); X.stroke();
+      // peg
+      X.fillStyle = '#666'; X.beginPath(); X.arc(toPxX(peg.x), toPxY(peg.y), toPxLen(peg.r), 0, Math.PI * 2); X.fill();
+      // ball
+      X.fillStyle = '#fff'; X.beginPath(); X.arc(toPxX(ball.x), toPxY(ball.y), toPxLen(ball.r), 0, Math.PI * 2); X.fill();
+      // HUD
+      X.fillStyle = '#fff'; X.font = '14px system-ui,sans-serif';
+      const freedLength_m = segLen * freeCount * ((N - 1) / N);
+      X.fillText('yarn: ' + freedLength_m.toFixed(1) + ' m', 12, 22);
+    }
 
-  // =====================
-  // Demo (SI units)
-  // =====================
-  const sim = XPBD({
-    dt: TUNE.SIM.DT_S,
-    iters: TUNE.SIM.ITERS,
-    substeps: TUNE.SIM.SUBSTEPS,
-    g: TUNE.SIM.GRAVITY_MPS2,
-    bounds: TUNE.SIM.BOUNDS_M,
-    collide: TUNE.SIM.COLLIDE_CIRCLES,
-    contactCompliance: TUNE.SIM.CONTACT_COMPLIANCE_M_PER_N
-  });
+    // =====================
+    // Animate
+    // =====================
+    fitCanvasToWindow();
+    let last = performance.now();
+    function tick(t) {
+      const dt = clamp((t - last) / 1000, 0, TUNE.DEMO.MAX_FRAME_DT_S);
+      last = t;
+      // keep the “wound” portion stuck to the ball
+      if (freeCount < N) {
+        const pin = rope[freeCount];
+        const a = worldAnchor(freeCount, ball.x, ball.y, 0);
+        pin.x = a.x; pin.y = a.y; pin.px = a.x; pin.py = a.y; // pure pin, static (w=0)
+      }
+      // also move the still-wound nodes to their anchors (static)
+      for (let i = freeCount + 1; i < N; i++) {
+        const p = rope[i];
+        const a = worldAnchor(i, ball.x, ball.y, 0);
+        p.x = a.x; p.y = a.y; p.px = a.x; p.py = a.y; p.vx = 0; p.vy = 0; p.w = 0;
+      }
 
-  // Build a rope
-  const N = TUNE.DEMO.ROPE_COUNT;
-  const start = TUNE.DEMO.ROPE_START_M;
-  const dx = TUNE.DEMO.ROPE_SEG_LEN_M, dy = 0;
-  const rope = [];
-  let prev = sim.add(start.x, start.y, 0, TUNE.DEMO.ROPE_NODE_RADIUS_M); // pinned
-  rope.push(prev);
-  for (let i = 1; i < N; i++) {
-    const p = sim.add(start.x + i*dx, start.y + i*dy, TUNE.DEMO.ROPE_NODE_MASS_KG, TUNE.DEMO.ROPE_NODE_RADIUS_M);
-    sim.link(prev, p, dx, sim.stiffnessToCompliance(TUNE.DEMO.ROPE_STIFFNESS_N_PER_M));
-    rope.push(p);
-    prev = p;
-  }
+      sim.step(dt);
 
-  // A ball
-  const ball = sim.add(
-    TUNE.DEMO.BALL_POS_M.x,
-    TUNE.DEMO.BALL_POS_M.y,
-    TUNE.DEMO.BALL_MASS_KG,
-    TUNE.DEMO.BALL_RADIUS_M
-  );
-
-  // Renderer
-  const r = SVGRenderer(sim, {
-    container: document.getElementById('app'),
-    width: TUNE.RENDER.WIDTH_PX,
-    height: TUNE.RENDER.HEIGHT_PX,
-    pixelsPerMeter: TUNE.RENDER.PIXELS_PER_METER
-  });
-
-  // Animate
-  let last = performance.now();
-  function tick(t) {
-    const dt = Math.min(TUNE.DEMO.MAX_FRAME_DT_S, (t - last) / 1000);
-    last = t;
-    sim.step(dt);
-    r.draw();
+      // render in first-script style
+      r.draw();
+      // extras on top
+      drawWoundPath();
+      drawTail();
+      drawStaticsAndHUD();
+      requestAnimationFrame(tick);
+    }
     requestAnimationFrame(tick);
-  }
-  requestAnimationFrame(tick);
 
-  // Click to apply a force toward the click point (N)
-  r.svg.addEventListener('click', e => {
-    const wp = r.screenToMeters(e.clientX, e.clientY);
-    const k = TUNE.DEMO.CLICK_POKE_N_PER_M;
-    sim.addForce(ball, (wp.x - ball.x) * k, (wp.y - ball.y) * k);
-    signal = 'click';
+    // =====================
+    // Input: click applies a force
+    // =====================
+    C.addEventListener('click', e => {
+      const wp = r.screenToMeters(e.clientX, e.clientY);
+      const k = TUNE.DEMO.CLICK_POKE_N_PER_M;
+      sim.addForce(ball, (wp.x - ball.x) * k, (wp.y - ball.y) * k);
+      freeSegments(10);
+    });
+
   });
 </script>
