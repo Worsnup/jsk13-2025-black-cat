@@ -36,6 +36,7 @@
     BOUNDS_M:            [0, 0, 8, 6],
     COLLIDE_CIRCLES:     true,
     CONTACT_COMPLIANCE_M_PER_N: 0,
+    CONTACT_SLIDING_SLOP_M: 1e-3,
 
     // NEW: material properties for velocity-space resolution
     RESTITUTION:         0.20,   // bounciness (0..1)
@@ -141,7 +142,7 @@
     if (b.iI) { b.omega += b.iI * perpDot(rx, ry, jx, jy); }
    }
 
-   function resolveContactImpulse(a, pa, b, pb, nx, ny, e, mu, pen=0, sdt=1/60) {
+   function resolveContactImpulse(a, pa, b, pb, nx, ny, e, mu, pen=0, sdt=1/60, gDotN=0) {
     // pa/pb: world contact points on a/b
     // nx,ny: normal from a -> b (unit)
     const tax = -ny, tay = nx; // tangent
@@ -166,6 +167,9 @@
     const invEffN = rnA + rnB || 1e9;
     const invEffT = rtA + rtB || 1e9;
 
+    const mEffN = 1 / (invEffN || 1e-9);       // effective normal mass
+    const support = Math.max(0, gDotN) * mEffN * sdt; // impulse to resist closing accel
+
     // Normal impulse with restitution
     const vrel_n = rvx*nx + rvy*ny;
     const vrel_t = rvx*tax + rvy*tay;
@@ -183,7 +187,7 @@
     // Friction: apply even when vrel_n >= 0 as long as there is contact (pen > 0)
     if (pen > 0 || vrel_n < 0) {
       let jt = -vrel_t / invEffT;           // oppose tangential motion
-      const maxF = mu * Math.max(Jn, 0);    // bound by current normal support
+      const maxF = mu * (Math.max(Jn, 0) + support);
       jt = clamp(jt, -maxF, maxF);
       const jtx = jt * tax, jty = jt * tay;
       applyImpulse(a, -jtx, -jty, rax, ray);
@@ -209,9 +213,11 @@
    function circleCapsuleContact(c, cap) {
     const q = closestPointOnSegment(c.x, c.y, cap.x1, cap.y1, cap.x2, cap.y2);
     const dx = c.x - q.x, dy = c.y - q.y;
-    let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
+    let d = Math.hypot(dx, dy) || INTERNAL.EPS_M;
     const rs = (c.r||0) + cap.r;
-    return { hit: d < rs, d, nx: (dx)/d, ny: (dy)/d, pen: rs - d, pc: {x:q.x, y:q.y} };
+    const hit = d < rs + TUNE.SIM.CONTACT_SLIDING_SLOP_M;
+    const pen = Math.max(0, rs - d);
+    return { hit, d, nx: dx/d, ny: dy/d, pen, pc: {x:q.x, y:q.y} };
    }
 
    function step(dt = Wd.dt) {
@@ -382,7 +388,8 @@
         // contact points on surfaces
         const pa = { x: a.x + cc.nx * ( a.r), y: a.y + cc.ny * ( a.r) };
         const pb = { x: b.x - cc.nx * ( b.r), y: b.y - cc.ny * ( b.r) };
-        resolveContactImpulse(a, pa, b, pb, cc.nx, cc.ny, e, mu, cc.pen, sdt);
+        const gDotN = ((a.w?1:0) - (b.w?1:0)) * (Wd.g[0]*cc.nx + Wd.g[1]*cc.ny);
+        resolveContactImpulse(a, pa, b, pb, cc.nx, cc.ny, e, mu, cc.pen, sdt, gDotN);
        }
       }
       // rigid–capsule
@@ -394,8 +401,10 @@
         const ck = circleCapsuleContact(c, cap); if (!ck.hit) continue;
         // static/kinematic capsule → only body gets impulse
         const pb = { x: ck.pc.x, y: ck.pc.y }; // plane point
+        const nx = -ck.nx, ny = -ck.ny;
+        const gDotN = (Wd.g[0]*nx + Wd.g[1]*ny); // gravity pushing a into b?
         resolveContactImpulse(c, {x: c.x - ck.nx * c.r, y: c.y - ck.ny * c.r},
-         {x: cap.x1, y: cap.y1, vx:0, vy:0, omega:0, w:0, iI:0}, pb, -ck.nx, -ck.ny, e, mu, ck.pen, sdt);
+          {x: cap.x1, y: cap.y1, vx:0, vy:0, omega:0, w:0, iI:0}, pb, nx, ny, e, mu, ck.pen, sdt, gDotN);
        }
       }
       // bounds impulses for rigids (treat as static planes)
