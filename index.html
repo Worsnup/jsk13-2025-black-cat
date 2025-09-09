@@ -86,9 +86,9 @@
     C: [],  // distance constraints
     T: []   // tethers (unused here but supported)
    };
-   function add(x_m, y_m, mass_kg = 1, radius_m = 0, col_mask=7) {
+   function add(x_m, y_m, mass_kg = 1, radius_m = 0, col_mask=7, active=true) {
     const w = mass_kg > 0 ? 1 / mass_kg : 0;
-    const p = { x: x_m, y: y_m, px: x_m, py: y_m, vx: 0, vy: 0, w, r: radius_m, col_mask };
+    const p = { x: x_m, y: y_m, px: x_m, py: y_m, vx: 0, vy: 0, w, r: radius_m, col_mask, active };
     Wd.P.push(p); return p;
    }
    function setStatic(p, yes = true) { p.w = yes ? 0 : (p.w || 1); }
@@ -115,6 +115,7 @@
     for (let s = 0; s < sub; s++) {
      // integrate
      for (let i = 0; i < P.length; i++) {
+      if (!P[i].active) continue;
       const p = P[i];
       p.px = p.x; p.py = p.y;
       if (!p.w) continue;
@@ -168,6 +169,7 @@
       if (hasBounds) {
        const [minx, miny, maxx, maxy] = B;
        for (let i = 0; i < P.length; i++) {
+        if (!P[i].active) continue;
         const p = P[i], r = p.r || 0;
         if (p.x < minx + r) p.x = minx + r;
         if (p.x > maxx - r) p.x = maxx - r;
@@ -180,9 +182,9 @@
       if (doCollide) {
        const alphaC = (cComp || 0) / alphaScale;
        for (let i = 0; i < P.length; i++) {
-        const a = P[i]; if (!a.r) continue;
+        const a = P[i]; if (!a.r || !a.active) continue;
         for (let j = i + 1; j < P.length; j++) {
-         const b = P[j]; if (!b.r) continue;
+         const b = P[j]; if (!b.r || !b.active) continue;
          if ((a.col_mask & b.col_mask) === 0) continue;
          let dx = b.x - a.x, dy = b.y - a.y;
          let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
@@ -201,6 +203,7 @@
 
      // velocity update
      for (let i = 0; i < P.length; i++) {
+      if (!P[i].active) continue;
       const p = P[i];
       p.vx = (p.x - p.px) / sdt;
       p.vy = (p.y - p.py) / sdt;
@@ -310,7 +313,7 @@
      const p = rope[idx];
      p.w = 1 / TUNE.DEMO.ROPE_NODE_MASS_KG;          // make dynamic
      p.vx = ball.vx; p.vy = ball.vy;                 // inherit ball velocity
-     p.col_mask = 1;
+     p.col_mask = 2;
      freeCount++;
     }
     if (freeCount < N) {
@@ -319,6 +322,8 @@
      const limit = min(max(25, 0.1 * (N - freeCount)), N - freeCount);
      for (let i = 0; i < limit; i++) { totalRad += woundLocal.wR[i + freeCount]; }
      ball.r = max(0.05, totalRad / limit);
+    } else {
+     ball.active = false;
     }
    }
 
@@ -361,7 +366,7 @@
     return {
      bounds: TUNE.SIM.BOUNDS_M.slice(),
      tail, wound,
-     ball: { x: ball.x, y: ball.y, r: ball.r },
+     ball: { x: ball.x, y: ball.y, r: ball.r, active: ball.active },
      platform, peg,
      hud: { freedLength_m },
     };
@@ -424,48 +429,80 @@
     X.beginPath(); X.arc(pegPx[0], pegPx[1], toLen(peg.r), 0, Math.PI * 2); X.fill();
 
     // draw dotted outline of ball
-    const ballPx = toPx(bounds, ball.x, ball.y);
-    X.strokeStyle = 'rgba(255,255,255)';
-    X.lineWidth = 1;
-    X.setLineDash([4, 4]);
-    X.beginPath();
-    X.arc(ballPx[0], ballPx[1], toLen(ball.r), 0, Math.PI * 2);
-    X.stroke();
-    X.setLineDash([]);
-
+    if (ball.active) {
+     const ballPx = toPx(bounds, ball.x, ball.y);
+     X.strokeStyle = 'rgba(255,255,255)';
+     X.lineWidth = 1;
+     X.setLineDash([4, 4]);
+     X.beginPath();
+     X.arc(ballPx[0], ballPx[1], toLen(ball.r), 0, Math.PI * 2);
+     X.stroke();
+     X.setLineDash([]);
+    }
     // HUD
     X.fillStyle = '#fff'; X.font = '14px system-ui,sans-serif';
     X.fillText('yarn: ' + hud.freedLength_m.toFixed(1) + ' m', 12, 22);
    }
 
+   function dist(a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    return Math.hypot(dx, dy);
+   }
+
+   function catmullRomToBezier(ctx, pts, tension = 1) {
+    if (!pts || pts.length < 2) return;
+
+    // Duplicate endpoints to handle ends naturally
+    const P = [pts[0], ...pts, pts[pts.length - 1]];
+
+    // Parametrize (centripetal): u_{i+1} = u_i + |P_{i+1}-P_i|^0.5
+    const u = new Array(P.length).fill(0);
+    for (let i = 1; i < P.length; i++) {
+     u[i] = u[i - 1] + Math.pow(dist(P[i - 1], P[i]), 0.5);
+    }
+
+    // Start path
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+
+    for (let i = 1; i < P.length - 2; i++) {
+     const P0 = P[i - 1], P1 = P[i], P2 = P[i + 1], P3 = P[i + 2];
+
+     const u0 = u[i - 1], u1 = u[i], u2 = u[i + 1], u3 = u[i + 2];
+     const du01 = u1 - u0 || 1, du12 = u2 - u1 || 1, du23 = u3 - u2 || 1;
+
+     // Tangents with centripetal parameterization
+     const m1 = {
+      x: ((P2[0] - P1[0]) / du12 - (P1[0] - P0[0]) / du01) * du12 + (P2[0] - P1[0]) / du12,
+      y: ((P2[1] - P1[1]) / du12 - (P1[1] - P0[1]) / du01) * du12 + (P2[1] - P1[1]) / du12,
+     };
+     const m2 = {
+      x: ((P3[0] - P2[0]) / du23 - (P2[0] - P1[0]) / du12) * du12 + (P2[0] - P1[0]) / du12,
+      y: ((P3[1] - P2[1]) / du23 - (P2[1] - P1[1]) / du12) * du12 + (P2[1] - P1[1]) / du12,
+     };
+
+     // Scale tangents by tension (1 = standard Catmull–Rom; smaller tightens the curve)
+     const t = tension / 6;
+     const c1 = { x: P1[0] + m1.x * t, y: P1[1] + m1.y * t };
+     const c2 = { x: P2[0] - m2.x * t, y: P2[1] - m2.y * t };
+
+     ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, P2[0], P2[1]);
+    }
+
+    ctx.stroke();
+   }
+
+
    function drawYarn(state) {
     const {bounds, tail, wound} = state;
-    const mp = (a, b) => 0.5 * (a + b);
-    const n = tail.length + wound.length;
+    const m = tail.concat(wound), n = m.length;
     if (n < 2) return;
-
-    const m = new Array(2 * n - 1);
-    for (let i = 0; i < m.length; i = i + 2) {
-     let curArr, currIdx, nextArr, nextIdx;
-     let idx = (i / 2) | 0;
-     if (idx < tail.length - 1) { curArr = tail; currIdx = idx; nextArr = tail; nextIdx = idx + 1; }
-     else if (idx === tail.length - 1) { curArr = tail; currIdx = idx; nextArr = wound; nextIdx = 0; }
-     else { curArr = wound; currIdx = idx - tail.length; nextArr = wound; nextIdx = currIdx + 1; }
-     m[i] = { x: curArr[currIdx].x, y: curArr[currIdx].y };
-     if (nextIdx >= nextArr.length) break;
-     m[i + 1] = { x: mp(curArr[currIdx].x, nextArr[nextIdx].x), y: mp(curArr[currIdx].y, nextArr[nextIdx].y) };
+    for (let i = 0; i < n; i++) {
+     m[i] = toPx(bounds, m[i].x, m[i].y);
     }
-    X.restore();
+    X.save();
     X.lineCap = 'round'; X.lineJoin = 'round'; X.strokeStyle = cfg.linkStroke; X.lineWidth = cfg.linkWidth;
-    X.beginPath();
-    const start = toPx(bounds, m[0].x, m[0].y);
-    X.moveTo(start[0], start[1]);
-    for (let i = 1; i < m.length - 1; i = i + 2) {
-     const ctrl = toPx(bounds, m[i].x, m[i].y);
-     const knot = toPx(bounds, m[i + 1].x, m[i + 1].y);
-     X.quadraticCurveTo(ctrl[0], ctrl[1], knot[0], knot[1]);
-    }
-    X.stroke();
+    catmullRomToBezier(X, m, 5);
     X.restore();
    }
 
