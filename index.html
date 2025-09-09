@@ -184,15 +184,12 @@
      applyImpulse(a, -jnx, -jny, rax, ray);
      applyImpulse(b,  jnx,  jny, rbx, rby);
     }
-    // Friction: apply even when vrel_n >= 0 as long as there is contact (pen > 0)
-    if (pen > 0 || vrel_n < 0) {
-      let jt = -vrel_t / invEffT;           // oppose tangential motion
-      const maxF = mu * (Math.max(Jn, 0) + support);
-      jt = clamp(jt, -maxF, maxF);
-      const jtx = jt * tax, jty = jt * tay;
-      applyImpulse(a, -jtx, -jty, rax, ray);
-      applyImpulse(b,  jtx,  jty, rbx, rby);
-    }
+    let jt = -vrel_t / invEffT;           // oppose tangential motion
+    const maxF = mu * (Math.max(Jn, 0) + support);
+    jt = clamp(jt, -maxF, maxF);
+    const jtx = jt * tax, jty = jt * tay;
+    applyImpulse(a, -jtx, -jty, rax, ray);
+    applyImpulse(b,  jtx,  jty, rbx, rby);
    }
 
    function circleCircleContact(a, b) {
@@ -536,8 +533,6 @@
     rope[0].w = 0; freeCount = 0;
    })();
 
-   function perpDot(ax, ay, bx, by) { return ax * by - ay * bx; }
-
    function freeSegments(n = 1) {
     for (let k = 0; k < n && freeCount < N; k++) {
      const idx = freeCount;
@@ -578,9 +573,6 @@
 
    function applyPoke(wx, wy, k = TUNE.DEMO.CLICK_POKE_N_PER_M) {
     sim.addForce(ball, (wx - ball.x) * k, (wy - ball.y) * k);
-    // also give it a little spin proportional to off-center poke
-    const rx = wx - ball.x, ry = wy - ball.y;
-    ball.omega += 0.2 * perpDot(rx, ry, (wx - ball.x), (wy - ball.y)) * (ball.iI || 0);
    }
 
    function getRenderData() {
@@ -591,7 +583,7 @@
     const wound = [];
     if (freeCount < N - 1) {
      for (let i = freeCount; i < N; i++) {
-      const a = worldAnchor(i, ball.x, ball.y, 0);
+      const a = worldAnchor(i, ball.x, ball.y, ball.theta);
       wound.push(a);
      }
     }
