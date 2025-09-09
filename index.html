@@ -44,12 +44,12 @@
    RENDER: {
     BG:                  '#0b0d12',
     LINK_STROKE:         '#d43375',
-    LINK_WIDTH_PX:       3,
+    LINK_WIDTH_PX:       8,
     PIXELS_PER_METER:    130,
     SHOW_BOUNDS:         false
    },
    DEMO: {
-    ROPE_COUNT:          200,
+    ROPE_COUNT:          1000,
     ROPE_START_M:        {x: 4, y: 0.8},
     ROPE_SEG_LEN_M:      0.10,
     ROPE_NODE_MASS_KG:   0.01,
@@ -527,11 +527,10 @@
      const idx = freeCount;
      const p = rope[idx];
      p.w = 1 / TUNE.DEMO.ROPE_NODE_MASS_KG;
-     const dx = p.x - ball.x, dy = p.y - ball.y, ang = atan2(dy, dx);
-     const tx = -sin(ang) * ball.omega * perpDot(dx, dy, cos(ang), sin(ang));
-     const ty =  cos(ang) * ball.omega * perpDot(dx, dy, cos(ang), sin(ang));
-     p.vx = ball.vx + tx;
-     p.vy = ball.vy + ty;
+     const dx = p.x - ball.x, dy = p.y - ball.y;
+     // ω × r = (-ω*ry, ω*rx)
+     p.vx = ball.vx + (-ball.omega) * dy;
+     p.vy = ball.vy + ( ball.omega) * dx;
      p.col_mask = 2;
      freeCount++;
     }
@@ -550,12 +549,12 @@
     // Kinematic wound section follows ball orientation (can later use ball.theta)
     if (freeCount < N) {
      const pin = rope[freeCount];
-     const a0 = worldAnchor(freeCount, ball.x, ball.y, 0);
+     const a0 = worldAnchor(freeCount, ball.x, ball.y, ball.theta);
      pin.x = a0.x; pin.y = a0.y; pin.px = a0.x; pin.py = a0.y;
     }
     for (let i = freeCount + 1; i < N; i++) {
      const p = rope[i];
-     const a = worldAnchor(i, ball.x, ball.y, 0);
+     const a = worldAnchor(i, ball.x, ball.y, ball.theta);
      p.x = a.x; p.y = a.y; p.px = a.x; p.py = a.y; p.vx = 0; p.vy = 0; p.w = 0;
     }
     sim.step(dt);
@@ -653,6 +652,13 @@
      X.strokeStyle = 'rgba(255,255,255)'; X.lineWidth = 1; X.setLineDash([4, 4]);
      X.beginPath(); X.arc(ballPx[0], ballPx[1], toLen(ball.r), 0, Math.PI * 2); X.stroke();
      X.setLineDash([]);
+
+     const [cx, cy] = toPx(bounds, ball.x, ball.y);
+     const rpx = toLen(ball.r);
+     X.beginPath();
+     X.moveTo(cx, cy);
+     X.lineTo(cx + rpx * Math.cos(ball.theta), cy + rpx * Math.sin(ball.theta));
+     X.strokeStyle = '#fff'; X.lineWidth = 2; X.stroke();
     }
 
     X.fillStyle = '#fff'; X.font = '14px system-ui,sans-serif';
