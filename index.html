@@ -8,7 +8,7 @@
   B.appendChild(C);
 
   // ===== Math helpers =====
-  const {min, max, hypot, sqrt, sin, cos, atan2, PI} = Math;
+  const {min, max, hypot, sqrt, sin, cos, PI} = Math;
   const clamp = (v, a, b) => max(a, min(b, v));
   const perpDot = (ax,ay,bx,by)=>ax*by-ay*bx; // 2D cross product magnitude
 
@@ -458,6 +458,11 @@
     BX0 + BW * 0.70, BY0 + BH * 0.60,
     0.12, 0, /*mask*/7, /*active*/true
    );
+   const floor = sim.addCapsule(
+    BX0 - BW, BY1,
+    BX0 + BW, BY1,
+    0.12, 0, /*mask*/7, /*active*/true
+   );
    const peg = sim.addRigidCircle(BX0 + BW * 0.80, BY0 + BH * 0.40, 0.20, 0, /*mask*/7, true);
 
    // --- Rope + ball ---
@@ -586,6 +591,7 @@
      tail, wound,
      ball: { x: ball.x, y: ball.y, r: ball.r, active: ball.active, theta: ball.theta },
      // expose NEW physics-backed shapes in the same schema the renderer expects
+     floor: { r: floor.r, x1: floor.x1, y1: floor.y1, x2: floor.x2, y2: floor.y2 },
      platform: { r: platform.r, x1: platform.x1, y1: platform.y1, x2: platform.x2, y2: platform.y2 },
      peg: { x: peg.x, y: peg.y, r: peg.r },
      hud: { freedLength_m },
@@ -618,26 +624,15 @@
    }
    function toLen(lm) { return lm * S; }
 
-   function drawBounds(bounds) {
-    if (!cfg.showBounds) return;
-    const [minx, miny, maxx, maxy] = bounds;
-    X.strokeStyle = 'rgba(255,255,255,.2)';
-    X.lineWidth = 1;
-    X.strokeRect((minx-minx)*S, (miny-miny)*S, (maxx-minx)*S, (maxy-miny)*S);
-   }
-
    function drawStaticsAndHUD(state) {
-    const {bounds, platform, peg, ball, hud} = state;
-    const [BX0, _, BX1, BY1] = bounds;
+    const {bounds, floor, platform, peg, ball, hud} = state;
 
-    // floor
-    X.strokeStyle = '#444'; X.lineWidth = 0.05 * S;
-    X.beginPath();
-    let p0 = toPx(bounds, BX0, BY1); let p1 = toPx(bounds, BX1, BY1);
-    X.moveTo(p0[0], p0[1]); X.lineTo(p1[0], p1[1]); X.stroke();
+    // floor (capsule)
+    X.strokeStyle = '#666'; X.lineCap = 'round'; X.lineWidth = platform.r * S * 2;
+    let p0 = toPx(bounds, floor.x1, floor.y1); let p1 = toPx(bounds, floor.x2, floor.y2);
+    X.beginPath(); X.moveTo(p0[0], p0[1]); X.lineTo(p1[0], p1[1]); X.stroke();
 
     // platform (capsule)
-    X.strokeStyle = '#666'; X.lineCap = 'round'; X.lineWidth = platform.r * S * 2;
     p0 = toPx(bounds, platform.x1, platform.y1); p1 = toPx(bounds, platform.x2, platform.y2);
     X.beginPath(); X.moveTo(p0[0], p0[1]); X.lineTo(p1[0], p1[1]); X.stroke();
 
@@ -695,7 +690,6 @@
 
    function draw(state) {
     clear();
-    drawBounds(state.bounds);
     drawYarn(state);
     drawStaticsAndHUD(state);
    }
