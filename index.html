@@ -141,7 +141,7 @@
     if (b.iI) { b.omega += b.iI * perpDot(rx, ry, jx, jy); }
    }
 
-   function resolveContactImpulse(a, pa, b, pb, nx, ny, e, mu) {
+   function resolveContactImpulse(a, pa, b, pb, nx, ny, e, mu, pen=0, sdt=1/60) {
     // pa/pb: world contact points on a/b
     // nx,ny: normal from a -> b (unit)
     const tax = -ny, tay = nx; // tangent
@@ -168,20 +168,26 @@
 
     // Normal impulse with restitution
     const vrel_n = rvx*nx + rvy*ny;
-    if (vrel_n < 0) {
-     const jn = -(1+e) * vrel_n / invEffN;
-     const jnx = jn * nx, jny = jn * ny;
+    const vrel_t = rvx*tax + rvy*tay;
+    // Normal: restitution only if approaching; add small Baumgarte bias for sustained contact
+    let jn = 0;
+    if (vrel_n < 0) jn = -(1+e) * vrel_n / invEffN;
+    const beta = 1; // contact bias factor
+    const jn_bias = (pen > 0 ? (beta * pen / sdt) / invEffN : 0);
+    const Jn = jn + jn_bias; // total normal impulse supporting contact
+    if (Jn !== 0) {
+     const jnx = Jn * nx, jny = Jn * ny;
      applyImpulse(a, -jnx, -jny, rax, ray);
      applyImpulse(b,  jnx,  jny, rbx, rby);
-
-     // Friction (Coulomb)
-     const vrel_t = rvx*tax + rvy*tay;
-     let jt = -vrel_t / invEffT;
-     const maxF = mu * jn;
-     jt = clamp(jt, -maxF, maxF);
-     const jtx = jt * tax, jty = jt * tay;
-     applyImpulse(a, -jtx, -jty, rax, ray);
-     applyImpulse(b,  jtx,  jty, rbx, rby);
+    }
+    // Friction: apply even when vrel_n >= 0 as long as there is contact (pen > 0)
+    if (pen > 0 || vrel_n < 0) {
+      let jt = -vrel_t / invEffT;           // oppose tangential motion
+      const maxF = mu * Math.max(Jn, 0);    // bound by current normal support
+      jt = clamp(jt, -maxF, maxF);
+      const jtx = jt * tax, jty = jt * tay;
+      applyImpulse(a, -jtx, -jty, rax, ray);
+      applyImpulse(b,  jtx,  jty, rbx, rby);
     }
    }
 
@@ -376,7 +382,7 @@
         // contact points on surfaces
         const pa = { x: a.x + cc.nx * ( a.r), y: a.y + cc.ny * ( a.r) };
         const pb = { x: b.x - cc.nx * ( b.r), y: b.y - cc.ny * ( b.r) };
-        resolveContactImpulse(a, pa, b, pb, cc.nx, cc.ny, e, mu);
+        resolveContactImpulse(a, pa, b, pb, cc.nx, cc.ny, e, mu, cc.pen, sdt);
        }
       }
       // rigid–capsule
@@ -388,12 +394,8 @@
         const ck = circleCapsuleContact(c, cap); if (!ck.hit) continue;
         // static/kinematic capsule → only body gets impulse
         const pb = { x: ck.pc.x, y: ck.pc.y }; // plane point
-        resolveContactImpulse(
-         c, {x: c.x - ck.nx * c.r, y: c.y - ck.ny * c.r},
-         {x: cap.x1, y: cap.y1, vx:0, vy:0, omega:0, w:0, iI:0}, // virtual static body
-         pb,
-         -ck.nx, -ck.ny, e, mu
-        );
+        resolveContactImpulse(c, {x: c.x - ck.nx * c.r, y: c.y - ck.ny * c.r},
+         {x: cap.x1, y: cap.y1, vx:0, vy:0, omega:0, w:0, iI:0}, pb, -ck.nx, -ck.ny, e, mu, ck.pen, sdt);
        }
       }
       // bounds impulses for rigids (treat as static planes)
