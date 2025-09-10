@@ -44,7 +44,8 @@
    },
    RENDER: {
     BG:                  '#0b0d12',
-    LINK_STROKE:         '#d43375',
+    LINK_STROKE:         ['#e74688', '#d73779', '#cb2f6f'],
+    LINK_PATTERN:        [0, 0, 1, 2, 1],
     LINK_WIDTH_PX:       8,
     PIXELS_PER_METER:    130,
     SHOW_BOUNDS:         false
@@ -612,6 +613,7 @@
     pixelsPerMeter: TUNE.RENDER.PIXELS_PER_METER,
     bg: TUNE.RENDER.BG,
     linkStroke: TUNE.RENDER.LINK_STROKE,
+    linkPattern: TUNE.RENDER.LINK_PATTERN,
     linkWidth: TUNE.RENDER.LINK_WIDTH_PX,
     showBounds: TUNE.RENDER.SHOW_BOUNDS
    };
@@ -663,20 +665,31 @@
     X.fillText('yarn: ' + hud.freedLength_m.toFixed(1) + ' m', 12, 22);
    }
 
-   function drawCurve(ctx, pts) {
+   function drawYarnCurve(pts) {
     if (!pts || pts.length < 2) return;
     const n = pts.length - 1, m = Array(n);
     const mp = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
     for (let i = 0; i < n; i++) {
      m[i] = mp(pts[i], pts[i + 1]);
     }
-    ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
-    ctx.quadraticCurveTo(pts[0][0], pts[0][1], m[0][0], m[0][1]);
+    let colorIdx = 0, color = cfg.linkStroke[cfg.linkPattern[colorIdx]];
+    X.save();
+    X.lineWidth = cfg.linkWidth; X.lineCap = 'round'; X.lineJoin = 'round'; X.strokeStyle = color;
+    X.beginPath(); X.moveTo(pts[0][0], pts[0][1]);
     for (let i = 0; i < n; i++) {
-     ctx.quadraticCurveTo(pts[i + 1][0], pts[i + 1][1], m[i][0], m[i][1]);
+     X.quadraticCurveTo(pts[i][0], pts[i][1], m[i][0], m[i][1]);
+     colorIdx = (colorIdx + 1) % cfg.linkPattern.length;
+     let newColor = cfg.linkStroke[cfg.linkPattern[colorIdx]];
+     if (newColor !== color) {
+      X.stroke();
+      X.beginPath();
+      X.moveTo(m[i][0], m[i][1]);
+      X.strokeStyle = color = newColor;
+     }
     }
-    ctx.quadraticCurveTo(pts[n][0], pts[n][1], pts[n][0], pts[n][1]);
-    ctx.stroke();
+    X.quadraticCurveTo(pts[n][0], pts[n][1], pts[n][0], pts[n][1]);
+    X.stroke();
+    X.restore();
    }
 
    function drawYarn(state) {
@@ -684,11 +697,7 @@
     const m = tail.concat(wound), n = m.length;
     if (n < 2) return;
     for (let i = 0; i < n; i++) m[i] = toPx(bounds, m[i].x, m[i].y);
-    X.save();
-    X.lineCap = 'round'; X.lineJoin = 'round';
-    X.strokeStyle = cfg.linkStroke; X.lineWidth = cfg.linkWidth;
-    drawCurve(X, m, 5);
-    X.restore();
+    drawYarnCurve(m);
    }
 
    function draw(state) {
