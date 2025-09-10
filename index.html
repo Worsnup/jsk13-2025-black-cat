@@ -339,11 +339,14 @@
        // rope particles vs capsules
        for (let i = 0; i < P.length; i++) {
         const a = P[i]; if (!a.active || !a.r) continue;
+        if (!a.w) continue;
         for (let j = 0; j < Wd.K.length; j++) {
          const cap = Wd.K[j]; if (!cap.active) continue;
          if ((a.col_mask & cap.col_mask) === 0) continue;
-         const ck = circleCapsuleContact(a, cap); if (!ck.hit) continue;
-         if (a.w) { a.x += ck.nx * ck.pen; a.y += ck.ny * ck.pen; }
+         const ck = circleCapsuleContact(a, cap);
+         if (!ck.hit) continue;
+         a.x += ck.nx * ck.pen;
+         a.y += ck.ny * ck.pen;
         }
        }
        // rope particles vs rigid circles (peg/ball/etc) if desired
