@@ -33,7 +33,7 @@
     ITERS:               18,
     GRAVITY_MPS2:        [0, 9.81],
     DRAG:                0.01,
-    BOUNDS_M:            [0, 0, 8, 6],
+    BOUNDS_M:            [0, -1000, 8, 6],
     COLLIDE_CIRCLES:     true,
     CONTACT_COMPLIANCE_M_PER_N: 0,
     CONTACT_SLIDING_SLOP_M: 1e-3,
@@ -43,14 +43,14 @@
     FRICTION:            0.55    // Coulomb μ
    },
    RENDER: {
-    BG:                  '#0b0d12',
+    BG:                  '#121825',
     LINK_STROKE:         ['#e74688', '#d73779', '#cb2f6f'],
     LINK_PATTERN:        [0, 0, 1, 2, 1],
     LINK_WIDTH_PX:       8,
     PIXELS_PER_METER:    130,
     SHOW_BOUNDS:         false
    },
-   DEMO: {
+   GAME: {
     ROPE_COUNT:          1000,
     ROPE_START_M:        {x: 4, y: 0.8},
     ROPE_SEG_LEN_M:      0.10,
@@ -63,9 +63,71 @@
     BALL_MASS_KG:        2,
 
     MAX_FRAME_DT_S:      1/30,
-    CLICK_POKE_N_PER_M:  300
+    CLICK_POKE_N_PER_M:  300,
+
+
+    MAX_LEVELS:           100,        // number of platform “floors”
+    X_MARGIN_M:           0.6,             // keep platforms away from side walls
+    PLATFORM_RADIUS_M:    0.10,            // capsule half-width
+    PEG_RADIUS_M:         0.18,            // normal peg
+    THORN_RADIUS_M:       0.15,            // thorn peg
+    STEP_CHOICES_M:       [0.5, 1.0, 1.5], // vertical spacing between floors
+    PEG_SPAWN_PROB:       0.50,            // chance to put a normal peg between floors
+    THORN_START_DELTA_M:  25.0,             // no thorns until you've climbed this much
+    THORN_PROB_AT_START:  0.00,            // thorn prob at threshold height
+    THORN_PROB_AT_TOP:    0.80             // thorn prob near the top floors
    }
   };
+  let INTRO_T0 = performance.now();
+
+  // =========================
+  // GAME STATE
+  // =========================
+  const GAME = {
+   mode: 'playing',          // 'playing' | 'lost'
+   clicks: 0,
+   startY: TUNE.GAME.BALL_POS_M.y, // used for height = startY - ball.y
+   best_m: 0,
+   height_m: 0,
+   msg: ''
+  };
+  function lose(msg){ GAME.mode='lost'; GAME.msg=msg; }
+  function restartRun(){
+   // Optional: you can rebuild the whole scene; for tonight just reload page
+   location.reload();
+  }
+
+  // =========================
+  // CAMERA / VIEW WINDOW
+  // =========================
+  const VIEW = {
+   spanY_m: TUNE.SIM.BOUNDS_M[3], // screen shows ~6m tall; keep this constant
+   minY: 0                        // start showing the original 0..6m range
+  };
+
+  // =========================
+  // BACKGROUND "CAT EYES"
+  // =========================
+  const EYES = [];
+  (function buildEyes() {
+   // World spans from x=[bounds.x0..x1], y=[-1000..+6] per your BOUNDS_M edit
+   const [BX0, BY0, BX1, BY1] = TUNE.SIM.BOUNDS_M;
+   const W = BX1 - BX0;
+   const H = BY1 - BY0; // ~1006m tall
+   const COUNT = 300;   // tune this if you want more/less eyes
+   for (let i = 0; i < COUNT; i++) {
+    const x = BX0 + Math.random() * W;
+    const y = BY0 + Math.random() * H; // uniformly sprinkled
+    const r = 0.01 + Math.random() * 0.02; // pupil radius (m)
+    const gap = 0.04 + Math.random() * 0.05; // distance between pupils (m)
+    const a = 0.25 + Math.random() * 0.45; // opacity
+    const twinkle = Math.random() * Math.PI * 2;
+    // layer 0..1 for subtle parallax on x (super light)
+    const layer = Math.random();
+    EYES.push({x, y, r, gap, a, twinkle, layer});
+   }
+  })();
+
 
   // =========================
   // XPBD core + rigid augment
@@ -461,38 +523,74 @@
     friction: TUNE.SIM.FRICTION,
    });
 
+   // --- Tower generation (REPLACES the single platform/floor/peg section) ---
+   const plats = [];    // platforms (capsules)
+   const pegs = [];     // normal pegs (rigid circles)
+   const thorns = [];   // thorn pegs (rigid circles) — hazards
+
    const [BX0, BY0, BX1, BY1] = TUNE.SIM.BOUNDS_M;
    const BW = BX1 - BX0, BH = BY1 - BY0;
 
-   // --- Bonafide physics objects for environment (NEW) ---
-   const platform = sim.addCapsule(
-    BX0 + BW * 0.10, BY0 + BH * 0.70,
-    BX0 + BW * 0.70, BY0 + BH * 0.60,
-    0.12, 0, /*mask*/7, /*active*/true
-   );
-   const floor = sim.addCapsule(
-    BX0 - BW, BY1,
-    BX1 + BW, BY1,
-    0.12, 0, /*mask*/7, /*active*/true
-   );
-   const peg = sim.addRigidCircle(BX0 + BW * 0.80, BY0 + BH * 0.40, 0.20, 0, /*mask*/7, true);
+// Floor (keep it; it’s the “bottom”)
+   const floor = sim.addCapsule(BX0 - BW, BY1, BX1 + BW, BY1, 0.12, 0, 7, true);
+   plats.push(floor);
+
+// One quick platform near the start (quality-of-life)
+   plats.push(sim.addCapsule(BX0 + BW*0.15, BY1 - 0.9, BX1 - BW*0.15, BY1 - 1.0, TUNE.GAME.PLATFORM_RADIUS_M, 0, 7, true));
+
+   function rand(a,b){ return a + Math.random()*(b-a); }
+   function choice(a){ return a[(Math.random()*a.length)|0]; }
+
+// Build platforms from bottom upward (lower y → “higher”)
+   let currentY = BY1 - 1.2; // start a bit above floor
+   for (let i = 0; i < TUNE.GAME.MAX_LEVELS; i++) {
+    const dy = choice(TUNE.GAME.STEP_CHOICES_M);
+    const nextY = currentY - dy;
+
+    // Random x placement with margin
+    const xL = BX0 + TUNE.GAME.X_MARGIN_M;
+    const xR = BX1 - TUNE.GAME.X_MARGIN_M;
+    const x1 = rand(xL, xR - 2.0);
+    const x2 = x1 + rand(1.2, 2.4);              // platform span
+    plats.push(sim.addCapsule(x1, nextY, Math.min(x2, xR), nextY + rand(-0.05,0.05), TUNE.GAME.PLATFORM_RADIUS_M, 0, 7, true));
+
+    // Between this and previous floor, maybe spawn a peg
+    const midY = (currentY + nextY) * 0.5;
+    const midX = rand(xL, xR);
+    const climbed_m = (TUNE.GAME.BALL_POS_M.y - nextY); // how far above start this floor sits
+
+    // Thorn probability ramps after threshold
+    const over = Math.max(0, climbed_m - TUNE.GAME.THORN_START_DELTA_M);
+    const ramp = Math.min(1, over / (BH*0.8)); // gentle ramp
+    const thornProb = TUNE.GAME.THORN_PROB_AT_START * (1 - ramp) + TUNE.GAME.THORN_PROB_AT_TOP * ramp;
+
+    if (Math.random() < TUNE.GAME.PEG_SPAWN_PROB) {
+     if (Math.random() < thornProb) {
+      thorns.push(sim.addRigidCircle(midX, midY, TUNE.GAME.THORN_RADIUS_M, 0, 7, true));
+     } else {
+      pegs.push(sim.addRigidCircle(midX, midY, TUNE.GAME.PEG_RADIUS_M, 0, 7, true));
+     }
+    }
+
+    currentY = nextY;
+   }
 
    // --- Rope + ball ---
-   const N = TUNE.DEMO.ROPE_COUNT;
-   const start = TUNE.DEMO.ROPE_START_M;
-   const segLen = TUNE.DEMO.ROPE_SEG_LEN_M;
+   const N = TUNE.GAME.ROPE_COUNT;
+   const start = TUNE.GAME.ROPE_START_M;
+   const segLen = TUNE.GAME.ROPE_SEG_LEN_M;
    const rope = [];
-   let prev = sim.add(start.x, start.y, TUNE.DEMO.ROPE_NODE_MASS_KG, TUNE.DEMO.ROPE_NODE_RADIUS_M, 0);
+   let prev = sim.add(start.x, start.y, TUNE.GAME.ROPE_NODE_MASS_KG, TUNE.GAME.ROPE_NODE_RADIUS_M, 0);
    rope.push(prev);
    for (let i = 1; i < N; i++) {
-    const p = sim.add(start.x + i * segLen, start.y, TUNE.DEMO.ROPE_NODE_MASS_KG, TUNE.DEMO.ROPE_NODE_RADIUS_M, 0);
-    sim.link(prev, p, segLen, sim.stiffnessToCompliance(TUNE.DEMO.ROPE_STIFFNESS_N_PER_M));
+    const p = sim.add(start.x + i * segLen, start.y, TUNE.GAME.ROPE_NODE_MASS_KG, TUNE.GAME.ROPE_NODE_RADIUS_M, 0);
+    sim.link(prev, p, segLen, sim.stiffnessToCompliance(TUNE.GAME.ROPE_STIFFNESS_N_PER_M));
     rope.push(p);
     prev = p;
    }
    const ball = sim.addRigidCircle(
-    TUNE.DEMO.BALL_POS_M.x, TUNE.DEMO.BALL_POS_M.y,
-    TUNE.DEMO.BALL_RADIUS_M, TUNE.DEMO.BALL_MASS_KG,
+    TUNE.GAME.BALL_POS_M.x, TUNE.GAME.BALL_POS_M.y,
+    TUNE.GAME.BALL_RADIUS_M, TUNE.GAME.BALL_MASS_KG,
     1, true
    );
 
@@ -522,7 +620,7 @@
     for (let i = 1; i < total; i++) wR[i] = hypot(wX[i], wY[i]);
     return { wX, wY, wR };
    }
-   const woundLocal = buildWoundPath(N, segLen, TUNE.DEMO.BALL_RADIUS_M);
+   const woundLocal = buildWoundPath(N, segLen, TUNE.GAME.BALL_RADIUS_M);
    let freeCount = 0;
 
    function worldAnchor(i, cx, cy, ang = 0) {
@@ -541,7 +639,7 @@
     for (let k = 0; k < n && freeCount < N; k++) {
      const idx = freeCount;
      const p = rope[idx];
-     p.w = 1 / TUNE.DEMO.ROPE_NODE_MASS_KG;
+     p.w = 1 / TUNE.GAME.ROPE_NODE_MASS_KG;
      const dx = p.x - ball.x, dy = p.y - ball.y;
      // ω × r = (-ω*ry, ω*rx)
      p.vx = ball.vx + (-ball.omega) * dy;
@@ -575,7 +673,7 @@
     sim.step(dt);
    }
 
-   function applyPoke(wx, wy, k = TUNE.DEMO.CLICK_POKE_N_PER_M) {
+   function applyPoke(wx, wy, k = TUNE.GAME.CLICK_POKE_N_PER_M) {
     sim.addForce(ball, (wx - ball.x) * k, (wy - ball.y) * k);
    }
 
@@ -591,17 +689,16 @@
       wound.push(a);
      }
     }
-    const freedLength_m = TUNE.DEMO.ROPE_SEG_LEN_M * freeCount;
+    const freedLength_m = TUNE.GAME.ROPE_SEG_LEN_M * freeCount;
 
     return {
      bounds: TUNE.SIM.BOUNDS_M.slice(),
      tail, wound,
-     ball: { x: ball.x, y: ball.y, r: ball.r, active: ball.active, theta: ball.theta },
-     // expose NEW physics-backed shapes in the same schema the renderer expects
-     floor: { r: floor.r, x1: floor.x1, y1: floor.y1, x2: floor.x2, y2: floor.y2 },
-     platform: { r: platform.r, x1: platform.x1, y1: platform.y1, x2: platform.x2, y2: platform.y2 },
-     peg: { x: peg.x, y: peg.y, r: peg.r },
+     ball: { x: ball.x, y: ball.y, r: ball.r, active: ball.active, theta: ball.theta, vx: ball.vx, vy: ball.vy },
      hud: { freedLength_m },
+     platforms: plats.map(c => ({ r:c.r, x1:c.x1, y1:c.y1, x2:c.x2, y2:c.y2 })),  // NEW
+     pegs: pegs.map(p => ({ x:p.x, y:p.y, r:p.r })),                               // NEW
+     thorns: thorns.map(p => ({ x:p.x, y:p.y, r:p.r }))                             // NEW
     };
    }
 
@@ -633,39 +730,56 @@
    function toLen(lm) { return lm * S; }
 
    function drawStaticsAndHUD(state) {
-    const {bounds, floor, platform, peg, ball, hud} = state;
+    const {bounds, platforms, pegs, thorns, ball, hud} = state;
 
-    // floor (capsule)
-    X.strokeStyle = '#666'; X.lineCap = 'round'; X.lineWidth = platform.r * S * 2;
-    let p0 = toPx(bounds, floor.x1, floor.y1); let p1 = toPx(bounds, floor.x2, floor.y2);
-    X.beginPath(); X.moveTo(p0[0], p0[1]); X.lineTo(p1[0], p1[1]); X.stroke();
-
-    // platform (capsule)
-    p0 = toPx(bounds, platform.x1, platform.y1); p1 = toPx(bounds, platform.x2, platform.y2);
-    X.beginPath(); X.moveTo(p0[0], p0[1]); X.lineTo(p1[0], p1[1]); X.stroke();
-
-    // peg (circle)
-    const pegPx = toPx(bounds, peg.x, peg.y);
-    X.fillStyle = '#666';
-    X.beginPath(); X.arc(pegPx[0], pegPx[1], toLen(peg.r), 0, Math.PI * 2); X.fill();
-
-    // ball outline
-    if (ball.active) {
-     const ballPx = toPx(bounds, ball.x, ball.y);
-     X.strokeStyle = 'rgba(255,255,255)'; X.lineWidth = 1; X.setLineDash([4, 4]);
-     X.beginPath(); X.arc(ballPx[0], ballPx[1], toLen(ball.r), 0, Math.PI * 2); X.stroke();
-     X.setLineDash([]);
-
-     const [cx, cy] = toPx(bounds, ball.x, ball.y);
-     const rpx = toLen(ball.r);
-     X.beginPath();
-     X.moveTo(cx, cy);
-     X.lineTo(cx + rpx * Math.cos(ball.theta), cy + rpx * Math.sin(ball.theta));
-     X.strokeStyle = '#fff'; X.lineWidth = 2; X.stroke();
+    // platforms (capsules)
+    X.strokeStyle = '#666'; X.lineCap = 'round';
+    for (const cap of platforms) {
+     X.lineWidth = cap.r * S * 2;
+     const p0 = toPx(bounds, cap.x1, cap.y1);
+     const p1 = toPx(bounds, cap.x2, cap.y2);
+     X.beginPath(); X.moveTo(p0[0], p0[1]); X.lineTo(p1[0], p1[1]); X.stroke();
     }
 
+    // normal pegs
+    X.fillStyle = '#888';
+    for (const p of pegs) {
+     const q = toPx(bounds, p.x, p.y);
+     X.beginPath(); X.arc(q[0], q[1], toLen(p.r), 0, Math.PI*2); X.fill();
+    }
+
+    // thorn pegs (hazards)
+    X.fillStyle = '#c0392b';
+    for (const p of thorns) {
+     const q = toPx(bounds, p.x, p.y);
+     X.beginPath(); X.arc(q[0], q[1], toLen(p.r), 0, Math.PI*2); X.fill();
+     // quick “spikes” (pure cosmetic): short star lines
+     const spikes = 6, R = toLen(p.r), r = R*1.25;
+     X.beginPath();
+     for (let i=0;i<spikes;i++){
+      const a = (i / spikes) * Math.PI*2;
+      X.moveTo(q[0] + Math.cos(a)*R, q[1] + Math.sin(a)*R);
+      X.lineTo(q[0] + Math.cos(a)*r, q[1] + Math.sin(a)*r);
+     }
+     X.strokeStyle = '#c0392b'; X.lineWidth = 2; X.stroke();
+    }
+
+    // HUD
     X.fillStyle = '#fff'; X.font = '14px system-ui,sans-serif';
-    X.fillText('yarn: ' + hud.freedLength_m.toFixed(1) + ' m', 12, 22);
+    const yarnLeft = Math.max(0, 100.0 - hud.freedLength_m);
+    X.fillText('yarn left: ' + yarnLeft.toFixed(1) + ' m', 12, 22);
+    X.fillText('height: ' + (GAME.startY - ball.y).toFixed(1) + ' m', 12, 42);
+    X.fillText('best: ' + GAME.best_m.toFixed(1) + ' m', 12, 62);
+    if (GAME.mode === 'lost') X.fillText(GAME.msg + '  (click to restart)', 12, 84);
+
+    const t = performance.now() - INTRO_T0;
+    if (t < 10000) {
+     X.globalAlpha = 0.8;
+     X.fillStyle = '#d8d8ff';
+     X.font = '13px system-ui,sans-serif';
+     X.fillText('A black cat must climb the tower before dawn, but its yarn is limited…', 12, 82);
+     X.globalAlpha = 1;
+    }
    }
 
    function drawYarnCurve(pts) {
@@ -703,10 +817,51 @@
     drawYarnCurve(m);
    }
 
-   function draw(state) {
+   function drawEyes(viewBounds){
+    // Only draw eyes that are inside the camera slice to keep it cheap
+    const [BX0, BY0, BX1, BY1] = viewBounds;
+    const margin = 0.5; // draw a bit beyond edges to avoid popping
+    const now = performance.now() * 0.002;
+
+    X.save();
+    for (const e of EYES) {
+     if (e.y < BY0 - margin || e.y > BY1 + margin) continue;
+
+     // subtle parallax on x: nudge by camera vertical (layer-dependent)
+     const parallaxX = (BY0) * 0.02 * (e.layer - 0.5);
+     const ex = e.x + parallaxX;
+
+     // both pupils in world space
+     const L = toPx(viewBounds, ex - e.gap*0.5, e.y);
+     const R = toPx(viewBounds, ex + e.gap*0.5, e.y);
+     const rp = toLen(e.r);
+
+     // twinkle: breathe radius a tiny bit
+     const tw = (Math.sin(now + e.twinkle) * 0.15 + 0.85);
+     const rr = rp * tw;
+
+     // glow
+     X.globalAlpha = e.a * 0.6;
+     X.shadowColor = '#e6fffa';
+     X.shadowBlur = rr * 3.0;
+     X.fillStyle = '#e6fffa';
+
+     X.beginPath(); X.arc(L[0], L[1], rr, 0, Math.PI*2); X.fill();
+     X.beginPath(); X.arc(R[0], R[1], rr, 0, Math.PI*2); X.fill();
+
+     // reset per eye to avoid compounding blur
+     X.shadowBlur = 0;
+    }
+    X.restore();
+   }
+
+   function draw(state, viewBounds) {
     clear();
-    drawYarn(state);
-    drawStaticsAndHUD(state);
+    const b = viewBounds || state.bounds;
+    const proxy = Object.assign({}, state, {bounds: b});
+    drawEyes(b);
+    drawYarn(proxy);
+    drawStaticsAndHUD(proxy);
    }
 
    function screenToMeters(bounds, clientX, clientY) {
@@ -732,21 +887,91 @@
   fitCanvasToWindow();
   let last = performance.now();
   function tick(t) {
-   const dt = clamp((t - last) / 1000, 0, TUNE.DEMO.MAX_FRAME_DT_S);
+   const dt = clamp((t - last) / 1000, 0, TUNE.GAME.MAX_FRAME_DT_S);
    last = t;
+
    simCtl.advance(dt);
-   renderer.draw(simCtl.getRenderData());
+   const state = simCtl.getRenderData();
+
+   // === Camera follow (render-only) ===
+   const targetMinY = state.ball.y - 2.5; // keep ball ~2.5m from top
+   if (targetMinY < VIEW.minY) {
+     // smooth upward pan (optional), or just snap:
+     VIEW.minY = 0.85 * VIEW.minY + 0.15 * targetMinY;
+   }
+   if (targetMinY > VIEW.minY + 5) {
+    // smooth downward pan
+    VIEW.minY = 0.97 * VIEW.minY + 0.03 * targetMinY;
+   }
+   const viewBounds = [
+     state.bounds[0],
+     VIEW.minY,
+     state.bounds[2],
+     VIEW.minY + VIEW.spanY_m
+   ];
+
+   // Score (higher = better). “Climb” is decreasing y, so height = startY - current y
+   GAME.height_m = Math.max(0, GAME.startY - state.ball.y);
+   if (GAME.height_m > GAME.best_m) GAME.best_m = GAME.height_m;
+
+   if (GAME.mode === 'playing') {
+    // A) Out of yarn → ball becomes inactive in your sim; end run
+    if (!state.ball.active) {
+     lose('Out of yarn');
+    }
+
+    // B) Fell off bottom: near lower bound (BY1)
+    const BY1 = state.bounds[3];
+    if (state.ball.y >= BY1 - 0.01) {
+     lose('You fell');
+    }
+
+    // C) Hit thorn (ball or any tail node)
+    if (hitThorn(state)) {
+     lose('Thorned!');
+    }
+   }
+
+   renderer.draw(state, viewBounds);
    requestAnimationFrame(tick);
   }
+
+// Thorn collision check (cheap distance tests)
+  function hitThorn(state){
+   const thorns = state.thorns || [];
+   if (!thorns.length) return false;
+
+   // Ball vs thorns
+   for (const h of thorns) {
+    const dx = state.ball.x - h.x, dy = state.ball.y - h.y;
+    if (Math.hypot(dx,dy) <= state.ball.r + h.r) return true;
+   }
+   // Tail points vs thorns (nodes are small circles)
+   const nr = TUNE.GAME.ROPE_NODE_RADIUS_M;
+   for (const p of state.tail) {
+    for (const h of thorns) {
+     const dx = p.x - h.x, dy = p.y - h.y;
+     if (Math.hypot(dx,dy) <= nr + h.r) return true;
+    }
+   }
+   return false;
+  }
+
   requestAnimationFrame(tick);
 
   // =====================
   // Input
   // =====================
   C.addEventListener('click', e => {
+   if (GAME.mode === 'lost') { restartRun(); return; }
+
+   GAME.clicks++;
    const state = simCtl.getRenderData();
-   const wp = renderer.screenToMeters(state.bounds, e.clientX, e.clientY);
-   simCtl.applyPoke(wp.x, wp.y, TUNE.DEMO.CLICK_POKE_N_PER_M);
+   const viewBounds = [state.bounds[0], VIEW.minY, state.bounds[2], VIEW.minY + VIEW.spanY_m];
+   const wp = renderer.screenToMeters(viewBounds, e.clientX, e.clientY);
+   simCtl.applyPoke(wp.x, wp.y, TUNE.GAME.CLICK_POKE_N_PER_M);
+
+   // Only unspool if yarn remains (freeSegments no-op once it hits total, but be explicit)
    simCtl.freeSegments(10);
   });
  });
