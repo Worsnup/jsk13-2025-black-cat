@@ -8,7 +8,7 @@
   B.appendChild(C);
 
   // ===== Math helpers =====
-  const {min, max, hypot, sqrt, sin, cos, PI} = Math;
+  const {min, max, hypot, sqrt, sin, cos, PI, random} = Math;
   const clamp = (v, a, b) => max(a, min(b, v));
   const perpDot = (ax,ay,bx,by)=>ax*by-ay*bx; // 2D cross product magnitude
 
@@ -65,6 +65,10 @@
     MAX_FRAME_DT_S:      1/30,
     CLICK_POKE_N_PER_M:  300,
 
+    YARN_SNAP_MAX_STRETCH: 1.35,   // break if link > 150% rest length (make it easy)
+    YARN_SNAP_COOLDOWN_S:  0.15,   // avoid cascading breaks in one solver step
+    YARN_SNAP_MIN_FROM_TIP: 20,     // don’t snap the very tip segment
+    DEBRIS_COLLIDES:       true,  // snapped-off pieces collide? false = no
 
     MAX_LEVELS:           100,        // number of platform “floors”
     X_MARGIN_M:           0.6,             // keep platforms away from side walls
@@ -116,14 +120,14 @@
    const H = BY1 - BY0; // ~1006m tall
    const COUNT = 300;   // tune this if you want more/less eyes
    for (let i = 0; i < COUNT; i++) {
-    const x = BX0 + Math.random() * W;
-    const y = BY0 + Math.random() * H; // uniformly sprinkled
-    const r = 0.01 + Math.random() * 0.02; // pupil radius (m)
-    const gap = 0.04 + Math.random() * 0.05; // distance between pupils (m)
-    const a = 0.25 + Math.random() * 0.45; // opacity
-    const twinkle = Math.random() * Math.PI * 2;
+    const x = BX0 + random() * W;
+    const y = BY0 + random() * H; // uniformly sprinkled
+    const r = 0.01 + random() * 0.02; // pupil radius (m)
+    const gap = 0.04 + random() * 0.05; // distance between pupils (m)
+    const a = 0.25 + random() * 0.45; // opacity
+    const twinkle = random() * PI * 2;
     // layer 0..1 for subtle parallax on x (super light)
-    const layer = Math.random();
+    const layer = random();
     EYES.push({x, y, r, gap, a, twinkle, layer});
    }
   })();
@@ -186,7 +190,7 @@
    }
 
    function link(a, b, rest_m = null, compliance_m_per_N = 0) {
-    if (rest_m == null) { const dx = b.x - a.x, dy = b.y - a.y; rest_m = Math.hypot(dx, dy); }
+    if (rest_m == null) { const dx = b.x - a.x, dy = b.y - a.y; rest_m = hypot(dx, dy); }
     const c = { a, b, rest: rest_m, comp: compliance_m_per_N, lam: 0 };
     Wd.C.push(c); return c;
    }
@@ -231,7 +235,7 @@
     const invEffT = rtA + rtB || 1e9;
 
     const mEffN = 1 / (invEffN || 1e-9);       // effective normal mass
-    const support = Math.max(0, gDotN) * mEffN * sdt; // impulse to resist closing accel
+    const support = max(0, gDotN) * mEffN * sdt; // impulse to resist closing accel
 
     // Normal impulse with restitution
     const vrel_n = rvx*nx + rvy*ny;
@@ -248,7 +252,7 @@
      applyImpulse(b,  jnx,  jny, rbx, rby);
     }
     let jt = -vrel_t / invEffT;           // oppose tangential motion
-    const maxF = mu * (Math.max(Jn, 0) + support);
+    const maxF = mu * (max(Jn, 0) + support);
     jt = clamp(jt, -maxF, maxF);
     const jtx = jt * tax, jty = jt * tay;
     applyImpulse(a, -jtx, -jty, rax, ray);
@@ -257,7 +261,7 @@
 
    function circleCircleContact(a, b) {
     const dx = b.x - a.x, dy = b.y - a.y;
-    let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
+    let d = hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
     const rs = (a.r || 0) + (b.r || 0);
     return { hit: d < rs, d, nx: dx/d, ny: dy/d, pen: rs - d };
    }
@@ -273,10 +277,10 @@
    function circleCapsuleContact(c, cap) {
     const q = closestPointOnSegment(c.x, c.y, cap.x1, cap.y1, cap.x2, cap.y2);
     const dx = c.x - q.x, dy = c.y - q.y;
-    let d = Math.hypot(dx, dy) || INTERNAL.EPS_M;
+    let d = hypot(dx, dy) || INTERNAL.EPS_M;
     const rs = (c.r||0) + cap.r;
     const hit = d < rs + TUNE.SIM.CONTACT_SLIDING_SLOP_M;
-    const pen = Math.max(0, rs - d);
+    const pen = max(0, rs - d);
     return { hit, d, nx: dx/d, ny: dy/d, pen, pc: {x:q.x, y:q.y} };
    }
 
@@ -320,12 +324,12 @@
       for (let i = 0; i < Th.length; i++) {
        const t = Th[i], a = t.a, b = t.b;
        let dx = a.x - b.x, dy = a.y - b.y;
-       let d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
+       let d = hypot(dx, dy); if (d < INTERNAL.EPS_M) d = INTERNAL.EPS_M;
        const Cval = t.max - d; if (Cval >= 0) { t.lam = 0; continue; }
        const nx = dx / d, ny = dy / d;
        const wsum = a.w + b.w; if (wsum === 0) continue;
        const alpha = (t.comp || 0) / alphaScale;
-       const oldLam = Math.max(0, t.lam) * INTERNAL.LAMBDA_DECAY;
+       const oldLam = max(0, t.lam) * INTERNAL.LAMBDA_DECAY;
        let dlam = (-Cval - alpha * oldLam) / (wsum + alpha);
        let newLam = oldLam + dlam;
        if (newLam < 0) { dlam = -oldLam; newLam = 0; }
@@ -339,7 +343,7 @@
       for (let i = 0; i < Cn.length; i++) {
        const c = Cn[i], a = c.a, b = c.b;
        let dx = b.x - a.x, dy = b.y - a.y;
-       const d = Math.hypot(dx, dy); if (d < INTERNAL.EPS_M) continue;
+       const d = hypot(dx, dy); if (d < INTERNAL.EPS_M) continue;
        const nx = dx / d, ny = dy / d;
        const Cval = d - c.rest;
        const wsum = a.w + b.w; if (wsum === 0) { c.lam = 0; continue; }
@@ -523,6 +527,10 @@
     friction: TUNE.SIM.FRICTION,
    });
 
+   let snapCooldown_s = 0;                 // timer
+   const REST_LEN = TUNE.GAME.ROPE_SEG_LEN_M;
+   const MAX_STRETCH = TUNE.GAME.YARN_SNAP_MAX_STRETCH;
+
    // --- Tower generation (REPLACES the single platform/floor/peg section) ---
    const plats = [];    // platforms (capsules)
    const pegs = [];     // normal pegs (rigid circles)
@@ -538,8 +546,62 @@
 // One quick platform near the start (quality-of-life)
    plats.push(sim.addCapsule(BX0 + BW*0.15, BY1 - 0.9, BX1 - BW*0.15, BY1 - 1.0, TUNE.GAME.PLATFORM_RADIUS_M, 0, 7, true));
 
-   function rand(a,b){ return a + Math.random()*(b-a); }
-   function choice(a){ return a[(Math.random()*a.length)|0]; }
+   function rand(a,b){ return a + random()*(b-a); }
+   function choice(a){ return a[(random()*a.length)|0]; }
+
+   function breakLinkAt(i) {
+    // Break the constraint between rope[i] and rope[i+1]
+    const c = links[i];
+    if (c) {
+     // remove from the solver's constraint list
+     const idx = sim.C.indexOf(c);
+     if (idx >= 0) sim.C.splice(idx, 1);
+     links[i] = null;
+    }
+
+    // Everything BELOW i (from tailStartIdx..i) becomes debris
+    for (let j = tailStartIdx; j <= i; j++) {
+     if (!rope[j]) continue;
+     if (!TUNE.GAME.DEBRIS_COLLIDES) rope[j].col_mask = 0; // stop colliding
+     // keep mass so it falls away under gravity
+    }
+
+    // Move the "connected tail start" just after the break.
+    // DO NOT reduce freeCount — unraveled amount is preserved.
+    tailStartIdx = i + 1;
+
+    // Cooldown
+    snapCooldown_s = TUNE.GAME.YARN_SNAP_COOLDOWN_S;
+   }
+
+   function checkYarnSnap(dt) {
+    if (snapCooldown_s > 0) { snapCooldown_s -= dt; return; }
+
+    // Need at least two connected segments to consider snapping
+    if (freeCount - tailStartIdx <= 1) return;
+
+    let worstIdx = -1, worstRatio = 0;
+
+    // Only consider the CONNECTED part: [tailStartIdx .. freeCount-2]  (link i = between i and i+1)
+    for (let i = tailStartIdx; i < freeCount - 1; i++) {
+     const a = rope[i], b = rope[i+1];
+     const dx = b.x - a.x, dy = b.y - a.y;
+     const d = Math.hypot(dx, dy) || REST_LEN;
+     const ratio = d / REST_LEN;
+     if (ratio > worstRatio) { worstRatio = ratio; worstIdx = i; }
+    }
+
+    // Avoid snapping the very tip segment
+    if (!(worstIdx >= 0 && worstRatio >= MAX_STRETCH)) {
+     return;
+    }
+    const farFromTip = (worstIdx - tailStartIdx) >= TUNE.GAME.YARN_SNAP_MIN_FROM_TIP;
+    const farFromYarn = worstIdx < freeCount - TUNE.GAME.YARN_SNAP_MIN_FROM_TIP;
+    if (farFromTip && farFromYarn) {
+     breakLinkAt(worstIdx);
+    }
+   }
+
 
 // Build platforms from bottom upward (lower y → “higher”)
    let currentY = BY1 - 1.2; // start a bit above floor
@@ -552,7 +614,7 @@
     const xR = BX1 - TUNE.GAME.X_MARGIN_M;
     const x1 = rand(xL, xR - 2.0);
     const x2 = x1 + rand(1.2, 2.4);              // platform span
-    plats.push(sim.addCapsule(x1, nextY, Math.min(x2, xR), nextY + rand(-0.05,0.05), TUNE.GAME.PLATFORM_RADIUS_M, 0, 7, true));
+    plats.push(sim.addCapsule(x1, nextY, min(x2, xR), nextY + rand(-0.05,0.05), TUNE.GAME.PLATFORM_RADIUS_M, 0, 7, true));
 
     // Between this and previous floor, maybe spawn a peg
     const midY = (currentY + nextY) * 0.5;
@@ -560,12 +622,12 @@
     const climbed_m = (TUNE.GAME.BALL_POS_M.y - nextY); // how far above start this floor sits
 
     // Thorn probability ramps after threshold
-    const over = Math.max(0, climbed_m - TUNE.GAME.THORN_START_DELTA_M);
-    const ramp = Math.min(1, over / (BH*0.8)); // gentle ramp
+    const over = max(0, climbed_m - TUNE.GAME.THORN_START_DELTA_M);
+    const ramp = min(1, over / (BH*0.8)); // gentle ramp
     const thornProb = TUNE.GAME.THORN_PROB_AT_START * (1 - ramp) + TUNE.GAME.THORN_PROB_AT_TOP * ramp;
 
-    if (Math.random() < TUNE.GAME.PEG_SPAWN_PROB) {
-     if (Math.random() < thornProb) {
+    if (random() < TUNE.GAME.PEG_SPAWN_PROB) {
+     if (random() < thornProb) {
       thorns.push(sim.addRigidCircle(midX, midY, TUNE.GAME.THORN_RADIUS_M, 0, 7, true));
      } else {
       pegs.push(sim.addRigidCircle(midX, midY, TUNE.GAME.PEG_RADIUS_M, 0, 7, true));
@@ -582,11 +644,13 @@
    const rope = [];
    let prev = sim.add(start.x, start.y, TUNE.GAME.ROPE_NODE_MASS_KG, TUNE.GAME.ROPE_NODE_RADIUS_M, 0);
    rope.push(prev);
+   const links = []; // links[i] is the constraint between rope[i] and rope[i+1]
    for (let i = 1; i < N; i++) {
-    const p = sim.add(start.x + i * segLen, start.y, TUNE.GAME.ROPE_NODE_MASS_KG, TUNE.GAME.ROPE_NODE_RADIUS_M, 0);
-    sim.link(prev, p, segLen, sim.stiffnessToCompliance(TUNE.GAME.ROPE_STIFFNESS_N_PER_M));
-    rope.push(p);
-    prev = p;
+     const p = sim.add(start.x + i * segLen, start.y, TUNE.GAME.ROPE_NODE_MASS_KG, TUNE.GAME.ROPE_NODE_RADIUS_M, 0);
+     const c = sim.link(prev, p, segLen, sim.stiffnessToCompliance(TUNE.GAME.ROPE_STIFFNESS_N_PER_M));
+     links.push(c);
+     rope.push(p);
+     prev = p;
    }
    const ball = sim.addRigidCircle(
     TUNE.GAME.BALL_POS_M.x, TUNE.GAME.BALL_POS_M.y,
@@ -609,7 +673,7 @@
     const limit = total - locals.length;
     let dir = 1;
     for (let i = 0; i < limit; i++) {
-     if (Math.random() < 0.2) { dir *= -1; }
+     if (random() < 0.2) { dir *= -1; }
      const angle = dir * i * (segLen_m / (2 * PI * outer)) * 2 * PI;
      const r = (outer - inner) * sqrt(1 - i / limit) + inner;
      const p = { x: r * cos(angle), y: r * sin(angle)};
@@ -622,6 +686,8 @@
    }
    const woundLocal = buildWoundPath(N, segLen, TUNE.GAME.BALL_RADIUS_M);
    let freeCount = 0;
+   let tailStartIdx = 0;
+
 
    function worldAnchor(i, cx, cy, ang = 0) {
     const ca = cos(ang), sa = sin(ang);
@@ -671,6 +737,7 @@
      p.x = a.x; p.y = a.y; p.px = a.x; p.py = a.y; p.vx = 0; p.vy = 0; p.w = 0;
     }
     sim.step(dt);
+    checkYarnSnap(dt);
    }
 
    function applyPoke(wx, wy, k = TUNE.GAME.CLICK_POKE_N_PER_M) {
@@ -678,9 +745,10 @@
    }
 
    function getRenderData() {
-    const tailCount = Math.min(freeCount, N);
     const tail = [];
-    for (let i = 0; i < tailCount; i++) tail.push({ x: rope[i].x, y: rope[i].y });
+    for (let i = tailStartIdx; i < min(freeCount, N); i++) {
+      tail.push({ x: rope[i].x, y: rope[i].y });
+    }
 
     const wound = [];
     if (freeCount < N - 1) {
@@ -745,28 +813,28 @@
     X.fillStyle = '#888';
     for (const p of pegs) {
      const q = toPx(bounds, p.x, p.y);
-     X.beginPath(); X.arc(q[0], q[1], toLen(p.r), 0, Math.PI*2); X.fill();
+     X.beginPath(); X.arc(q[0], q[1], toLen(p.r), 0, PI*2); X.fill();
     }
 
     // thorn pegs (hazards)
     X.fillStyle = '#c0392b';
     for (const p of thorns) {
      const q = toPx(bounds, p.x, p.y);
-     X.beginPath(); X.arc(q[0], q[1], toLen(p.r), 0, Math.PI*2); X.fill();
+     X.beginPath(); X.arc(q[0], q[1], toLen(p.r), 0, PI*2); X.fill();
      // quick “spikes” (pure cosmetic): short star lines
      const spikes = 6, R = toLen(p.r), r = R*1.25;
      X.beginPath();
      for (let i=0;i<spikes;i++){
-      const a = (i / spikes) * Math.PI*2;
-      X.moveTo(q[0] + Math.cos(a)*R, q[1] + Math.sin(a)*R);
-      X.lineTo(q[0] + Math.cos(a)*r, q[1] + Math.sin(a)*r);
+      const a = (i / spikes) * PI*2;
+      X.moveTo(q[0] + cos(a)*R, q[1] + sin(a)*R);
+      X.lineTo(q[0] + cos(a)*r, q[1] + sin(a)*r);
      }
      X.strokeStyle = '#c0392b'; X.lineWidth = 2; X.stroke();
     }
 
     // HUD
     X.fillStyle = '#fff'; X.font = '14px system-ui,sans-serif';
-    const yarnLeft = Math.max(0, 100.0 - hud.freedLength_m);
+    const yarnLeft = max(0, 100.0 - hud.freedLength_m);
     X.fillText('yarn left: ' + yarnLeft.toFixed(1) + ' m', 12, 22);
     X.fillText('height: ' + (GAME.startY - ball.y).toFixed(1) + ' m', 12, 42);
     X.fillText('best: ' + GAME.best_m.toFixed(1) + ' m', 12, 62);
@@ -819,7 +887,7 @@
 
    function drawEyes(viewBounds){
     // Only draw eyes that are inside the camera slice to keep it cheap
-    const [BX0, BY0, BX1, BY1] = viewBounds;
+    const [_, BY0, __, BY1] = viewBounds;
     const margin = 0.5; // draw a bit beyond edges to avoid popping
     const now = performance.now() * 0.002;
 
@@ -837,7 +905,7 @@
      const rp = toLen(e.r);
 
      // twinkle: breathe radius a tiny bit
-     const tw = (Math.sin(now + e.twinkle) * 0.15 + 0.85);
+     const tw = (sin(now + e.twinkle) * 0.15 + 0.85);
      const rr = rp * tw;
 
      // glow
@@ -846,8 +914,8 @@
      X.shadowBlur = rr * 3.0;
      X.fillStyle = '#e6fffa';
 
-     X.beginPath(); X.arc(L[0], L[1], rr, 0, Math.PI*2); X.fill();
-     X.beginPath(); X.arc(R[0], R[1], rr, 0, Math.PI*2); X.fill();
+     X.beginPath(); X.arc(L[0], L[1], rr, 0, PI*2); X.fill();
+     X.beginPath(); X.arc(R[0], R[1], rr, 0, PI*2); X.fill();
 
      // reset per eye to avoid compounding blur
      X.shadowBlur = 0;
@@ -911,7 +979,7 @@
    ];
 
    // Score (higher = better). “Climb” is decreasing y, so height = startY - current y
-   GAME.height_m = Math.max(0, GAME.startY - state.ball.y);
+   GAME.height_m = max(0, GAME.startY - state.ball.y);
    if (GAME.height_m > GAME.best_m) GAME.best_m = GAME.height_m;
 
    if (GAME.mode === 'playing') {
@@ -932,6 +1000,10 @@
     }
    }
 
+   if (isNaN(state.ball.y)) {
+    restartRun()
+   }
+
    renderer.draw(state, viewBounds);
    requestAnimationFrame(tick);
   }
@@ -944,14 +1016,14 @@
    // Ball vs thorns
    for (const h of thorns) {
     const dx = state.ball.x - h.x, dy = state.ball.y - h.y;
-    if (Math.hypot(dx,dy) <= state.ball.r + h.r) return true;
+    if (hypot(dx,dy) <= state.ball.r + h.r) return true;
    }
    // Tail points vs thorns (nodes are small circles)
    const nr = TUNE.GAME.ROPE_NODE_RADIUS_M;
    for (const p of state.tail) {
     for (const h of thorns) {
      const dx = p.x - h.x, dy = p.y - h.y;
-     if (Math.hypot(dx,dy) <= nr + h.r) return true;
+     if (hypot(dx,dy) <= nr + h.r) return true;
     }
    }
    return false;
